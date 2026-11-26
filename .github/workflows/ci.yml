@@ -86,6 +86,8 @@ jobs:
           python -m pip install "$torch" --index-url https://download.pytorch.org/whl/cpu
           python -m pip install "${pins[@]}" "pytest==9.2.0"
           python -m pip install ./env
+          # the debug viewer's test writes an MP4 through ffmpeg
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg > /dev/null
           python -c "
           import doom_env, gymnasium, numpy, torch, vizdoom
           print('torch', torch.__version__, '| vizdoom', vizdoom.__version__, '| gymnasium', gymnasium.__version__, '| numpy', numpy.__version__)
