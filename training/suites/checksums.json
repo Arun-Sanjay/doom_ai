@@ -1,0 +1,22 @@
+{
+  "dev_nav_v1.jsonl": {
+    "maps": 60,
+    "file_sha256": "c733e78667a62d4a29b19f44c93ab1d355737b3c81f1a8ac03fc01591f8ed604",
+    "wads_sha256": "84a7223ec0d8eb26a59f62f6b678351600b84312511aea7b90f7b7ca72f8a0f6"
+  },
+  "dev_v1.jsonl": {
+    "maps": 80,
+    "file_sha256": "2faad082236926966962dcd85ec76163891eb725c7e47cb3c4b6bd2241ebbd3a",
+    "wads_sha256": "9f8829401ffb863aff74d9c165aab940bd4e81b0b1d304020b61098d9f0fa8b8"
+  },
+  "heldout_nav_v1.jsonl": {
+    "maps": 300,
+    "file_sha256": "ab5a59cafb8786c23adfa9523cb6c085f49f5cdbc3707ccc4bfe5e098242305c",
+    "wads_sha256": "cc4995c733673c09baee471f3fd3213bc02a9579c40718bd1232a94261e04846"
+  },
+  "heldout_v1.jsonl": {
+    "maps": 400,
+    "file_sha256": "cc6abd4873e17654d80bad3a6153a29fde8661d478f17450d571d7feaa9ac9cd",
+    "wads_sha256": "99f242b6a8696ee4c9455ee95f33fbafbd4d3303d3a12a9acb368977c5d5e25c"
+  }
+}

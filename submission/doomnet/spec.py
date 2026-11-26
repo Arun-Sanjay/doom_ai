@@ -112,13 +112,16 @@ def buttons_to_heads(buttons) -> np.ndarray:
 
 # ---- action masks from observation fields (docs/RULES.md section 1) ---------------------------------
 USE_REACH = 64.0           # the engine's USE trace goes this far, straight ahead
+MELEE_WEAPON_SLOT = 1      # fist and chainsaw share weapon slot 1
 
 
-def action_masks(ray_distance, ray_hit_type, entity_type, entity_mask) -> tuple[bool, bool]:
+def action_masks(ray_distance, ray_hit_type, entity_type, entity_mask, selected_weapon=None) -> tuple[bool, bool]:
     """Which of USE and ATTACK can have any effect right now.
 
     use_ok: the ray straight ahead ends on a door or locked door within USE reach.
-    attack_ok: at least one enemy is currently visible.
+    attack_ok: at least one enemy is currently visible and the selected weapon (vitals[2]) is not
+    the melee slot. A melee hit turns the player towards its target without any turn key, which
+    would silently break the pose estimate that the spatial memory is built on.
     A mask removes an option that would do nothing; the network chooses among what is left.
     The same function is applied to the logits in training and at inference.
     """
@@ -126,4 +129,6 @@ def action_masks(ray_distance, ray_hit_type, entity_type, entity_mask) -> tuple[
                   and float(ray_distance[0]) * RAY_RANGE <= USE_REACH + 2.0)
     t = np.asarray(entity_type)[np.asarray(entity_mask).astype(bool)]
     attack_ok = bool(((t >= ENT_MELEE) & (t <= ENT_PROJ_ENEMY)).any())
+    if selected_weapon is not None and int(round(float(selected_weapon))) == MELEE_WEAPON_SLOT:
+        attack_ok = False
     return use_ok, attack_ok
