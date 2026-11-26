@@ -72,10 +72,11 @@ Everything from the repository root on the box (/workspace/doom_ai), with the bo
      teacher_errors         internal errors of the teacher (that step is not labelled); expected 0
      kl, clip_frac, ev      PPO on the steps the policy chose itself (kl includes what distillation changes there)
      kl_unlabelled, minibatches
-                            the change of the policy on fights and unlabelled maps per update, and how many of the 54
-                            minibatches ran before the update was ended by target_kl_unlabelled (0.02). Expect few
-                            minibatches for the first 50 to 100 iterations (the combat checkpoint is being taught
-                            without being overwritten), then all 54. If it stays at 1 to 3 for hours, raise the limit
+                            kl on the steps the policy chose itself that carry no controller label (fights, maps
+                            without labels), manager choices included. About 6 in the very first update from a
+                            combat checkpoint (the untrained target pointer is being rewritten), 0.01 to 0.03
+                            afterwards. minibatches is 54 unless an update was ended early by a KL limit (none
+                            is set; see "Starting from a combat checkpoint" in unified_nav.txt)
    the teacher terms
      beta, forced           beta falls 1 -> 0.1 over the first 30 M steps (about 40 minutes); forced follows it, scaled by
                             the share of labelled steps (column "labelled")

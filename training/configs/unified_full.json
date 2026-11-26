@@ -9,7 +9,6 @@
   "heldout_envs": 384,
   "heldout_workers": 16,
   "ppo": {"bootstrap_on_truncation": false, "epochs": 3, "minibatch_chunks": 256, "lr": 0.0003, "lr_final": 0.2,
-          "lr_warmup": 30, "target_kl_unlabelled": 0.02,
           "distill_coef": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5], "field_coef": 10.0, "field_gamma": 0.95},
   "vec": {"teacher": "real", "reward": {"hit_bonus": 0.05}},
   "teach": {"beta_start": 1.0, "beta_floor": 0.1, "beta_steps": 30000000},

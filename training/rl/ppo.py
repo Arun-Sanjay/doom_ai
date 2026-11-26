@@ -79,11 +79,11 @@ class PPOConfig:
     chunk: int = 16                      # truncated-BPTT length
     minibatch_chunks: int = 256          # chunks per minibatch (samples = this * chunk)
     target_kl: float | None = None       # stop the epochs of an update early above 1.5 * this
-    # The same, measured only on the steps the policy chose itself and the teacher has no controller
-    # label for (fights, and maps without labels). The distillation terms are not meant to change the
-    # policy there, but they reach it through the shared layers; a run that starts from a trained
-    # combat policy would otherwise lose it in its first updates (measured: KL 5 after 9 gradient
-    # steps). With this limit an update ends as soon as those steps have moved this far.
+    # The same, measured only on the steps the policy chose itself that carry no controller label
+    # (fights, and maps without labels; the manager's choices are part of the log-probability). The
+    # distillation terms reach those steps through the shared layers and through the manager. Off by
+    # default: a run started from a combat checkpoint moved by KL 6 there in its first update and
+    # still fought as well minutes later (training/logs/unified_smoke.txt), so the limit only slowed it.
     target_kl_unlabelled: float | None = None
     lr_warmup: int = 0                   # updates over which the learning rate rises linearly from lr / lr_warmup
     # Distillation weights per controller head, then manager sub-goal and target. The target is a

@@ -186,7 +186,7 @@ def test_forced_steps_leave_the_policy_term_and_stay_in_the_others():
 
 
 def test_update_stops_when_unlabelled_steps_move_too_far_and_warms_the_learning_rate_up():
-    """Distillation must not rewrite the policy on steps the teacher has no label for (fights)."""
+    """The optional limit on how far one update may move the policy on steps without controller labels."""
     vec, net, buf, ppo, col = _toy_setup("toy:bandit", envs=8, steps=32, lr=2e-2, epochs=6, minibatch_chunks=4)
     try:
         col.collect()

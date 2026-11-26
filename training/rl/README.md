@@ -141,12 +141,14 @@ worker in `worker_respawns`.
 
 ## Settings worth knowing
 
-* `ppo.target_kl_unlabelled` and `ppo.lr_warmup` protect a starting checkpoint from the
-  distillation terms. An update ends as soon as the policy has moved by more than 1.5 times the
-  limit (KL) on the steps it chose itself and the teacher has no controller label for (fights,
-  unlabelled maps); the learning rate rises linearly over the first `lr_warmup` updates. Without
-  them a run started from a combat checkpoint moved by KL 5 on those steps within nine gradient
-  steps. Log columns `kl_unlabelled` and `minibatches`.
+* `ppo.target_kl_unlabelled` and `ppo.lr_warmup` slow the first updates of a run that starts
+  from a trained checkpoint: an update ends as soon as the policy has moved by more than 1.5 times
+  the limit (KL of the joint log-probability, manager choices included) on the steps it chose
+  itself that carry no controller label (fights, unlabelled maps), and the learning rate rises
+  linearly over the first `lr_warmup` updates. Both are off by default and off in the unified
+  configs: from a combat checkpoint the first update moves those steps by KL 6, yet the fighting
+  was intact four minutes later without any limit (`training/logs/unified_smoke.txt`). Log columns
+  `kl_unlabelled` and `minibatches`.
 * `agree` in the training log is measured on the trajectories of the run, which are driven more
   and more by the policy as `beta` falls; the teacher's labels in states the policy got itself
   into are harder to predict, so the column falls with `beta` although imitation improves. Use

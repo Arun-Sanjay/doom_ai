@@ -40,20 +40,20 @@ Loss (ppo)
   reward and leaving on time is learned from reward (the cap itself is not observable; the policy
   sees an assumed budget).
 
-Keeping what the starting checkpoint can do (ppo.lr_warmup, ppo.target_kl_unlabelled)
-  A combat checkpoint is very sure of its actions and its value field has never been supervised
-  (cross-entropy of the heads about 40 and field error about 18 at the first update, against 2.9
-  and 0.7 from a random start). Those gradients reach the fight steps through the shared layers:
-  without a limit the policy on its own unlabelled steps moved by KL 0.28 after one gradient step
-  and 5 after nine. Two settings prevent that:
-    lr_warmup 30             the learning rate rises linearly over the first 30 updates
-    target_kl_unlabelled 0.02  an update ends as soon as the policy has moved by more than 1.5 x 0.02
-                             (KL) on the steps it chose itself and the teacher has no controller
-                             label for: fights and unlabelled maps
-  In a 6-minute laptop run from the combat checkpoint (40 % tier 0, 60 % arenas) the updates were
-  cut to 2 to 8 of 18 minibatches at first and ran in full after about 80 iterations; kills per
-  monster stayed at 0.5 to 0.6 while the heads' cross-entropy fell from 42 to 1.6 and the field
-  error from 18.7 to 0.03 (training/logs/unified_smoke.txt). Columns: kl_unlabelled, minibatches.
+Starting from a combat checkpoint
+  A combat checkpoint is very sure of its actions and its value field and target pointer have never
+  been supervised: at the first update the heads' cross-entropy is about 40 and the field error about
+  18 (2.9 and 0.7 from a random start), and the joint log-probability of the steps the policy chose
+  itself moves by KL 6 in that one update (column kl_unlabelled; most of it is the manager's 4096-way
+  target pointer being rewritten). Measured on the laptop from the combat checkpoint, 40 % tier 0 and
+  60 % arenas, this did not cost the fighting: after 4 minutes the policy alone killed 0.68 of the
+  monsters on the held-out arenas (0.31 for the checkpoint as it was, see training/logs/unified_smoke.txt).
+  Two settings exist to slow that first phase down and are left off here because the same test
+  showed no benefit from them (0.65 after 6 minutes, with slower distillation):
+    ppo.lr_warmup N              the learning rate rises linearly over the first N updates
+    ppo.target_kl_unlabelled X   an update ends once the policy has moved by more than 1.5 X (KL) on the
+                                 steps it chose itself that carry no controller label
+  Use them (20 and 0.02 were the values tried) only if kill_frac collapses in the first hour.
 
 Distillation weight (distill), driven by the held-out exit rate
   Every heldout_every = 150 iterations (about 11 M steps) the policy alone plays one episode in each

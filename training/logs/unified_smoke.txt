@@ -1,0 +1,126 @@
+One-loop training check: the student drives, the teacher labels, loss = PPO + distillation
+====================================================================================
+
+Log: training/logs/unified_smoke.csv (one row per iteration). Config: training/configs/unified_smoke.json
+(explained in unified_smoke.txt next to it). 26 Nov, on a 15-core laptop shared with other jobs.
+
+Setup
+  From random initialisation (PolicyNet defaults, strict goal bottleneck, 1.31 M parameters).
+  6 worker processes x 16 environments, learner on the Apple GPU, 6144 steps per iteration,
+  4 epochs x 6 minibatches of 1024 samples.
+  Training maps: the 258 maps of tiers 0 and 2 in data/maps/train/manifest.jsonl that have no
+  monsters and a start on the 64-unit grid (182 of tier 0, 76 of tier 2), half of the episodes each.
+  Teacher mixing: beta 1.0 -> 0.2 over the first 700,000 steps, then 0.2. Distillation weight 1.
+  Tick cap terminal (ppo.bootstrap_on_truncation false).
+  The run stopped at its 1.5 M step budget after 19.7 minutes (245 iterations, 1,505,280 steps).
+  Training and every evaluation below ran from one frozen copy of the code (other areas of the
+  repository were being edited during the evening, see "Earlier runs").
+
+Training curve (columns of the csv; agreement = policy's most likely option against the teacher's
+label, measured on the run's own trajectories, which the policy drives more and more as beta falls)
+
+   min     steps  beta  CE heads  CE sub-goal  CE target  field   agree  all heads  sub-goal  target  exit rate in training
+   0.0      6144  1.00    2.95       1.82        8.27     0.689   0.678    0.269      0.42     0.00    1.00
+   2.6    190464  0.79    1.75       0.57        2.91     0.022   0.818    0.475      0.79     0.24    1.00
+   5.1    368640  0.59    1.87       0.54        2.25     0.019   0.806    0.454      0.80     0.42    0.96
+   7.5    540672  0.39    2.00       0.47        1.77     0.016   0.786    0.415      0.83     0.55    0.98
+  10.1    731136  0.20    2.26       0.49        1.95     0.017   0.744    0.335      0.83     0.53    0.86
+  15.1   1148928  0.20    2.05       0.48        1.63     0.014   0.773    0.397      0.82     0.56    0.93
+  19.7   1505280  0.20    2.07       0.57        1.79     0.014   0.769    0.399      0.80     0.53    0.92
+
+  Distillation loss (weighted sum of the three cross-entropies): 8.91 -> 3.1 to 3.5.
+  The agreement column peaks at 0.83 while the teacher still drives most steps and falls with
+  beta: the labels in states the student got itself into are harder to predict. It is therefore
+  measured separately, on held-out maps:
+
+Agreement with the teacher on held-out maps (dev_nav_v1 tier 2, 12,288 steps each; training.rl.agree)
+
+                         per labelled head   all heads   move   strafe   turn    use    sub-goal   target (exact / cells off)
+   teacher drives             0.868            0.588     0.836  0.853    0.789   0.995    0.79       0.54 / 1.6
+   student drives             0.708            0.302     0.607  0.644    0.619   0.963    0.64       0.38 / 2.4
+   first iteration (training) 0.678            0.269     0.544  0.761    0.429   0.976    0.42       0.00 / 30
+
+  Above 0.85 only on teacher-driven states and only as the mean over the four labelled heads
+  (USE is "off" on most steps and easy). The share of steps on which all four agree is 0.59.
+
+Student driving alone (beta 0, no teacher; USE and weapon by most likely option, the other heads and
+the manager's choices sampled, as the agent decodes; assumed budget 525 steps; training.rl.eval_alone)
+
+   held-out maps, monsters stripped (training/suites/dev_nav_v1.jsonl)       exits      rate
+   tier 2, 20 maps x 3 episodes                                            37 / 60     0.62
+   all 60 maps (20 each of tiers 2, 3, 4), seed 0                          21 / 60     0.35    tier 2 11/20, tier 3 3/20, tier 4 7/20
+   all 60 maps, seed 2                                                     29 / 60     0.48    tier 2 14/20, tier 3 5/20, tier 4 10/20
+   untrained network, all 60 maps                                           0 / 60     0.00
+
+  Every failure is a timeout (no deaths); door reversals 0.0 to 0.15 per episode.
+  The 50 % mark is passed on tier 2 (62 of 100 episodes over the three runs), the tier the student
+  was trained on. It is not passed on the full 60-map set with the agent's decoding (50 of 120,
+  0.42): tiers 3 and 4 of the suite need a key and have routes of 51 and 56 cells (median) against
+  12 and 22 on the training maps, and one third of the tier 0 training maps is all the key practice
+  this run had.
+  Decoding matters: with move, strafe and turn also taken by most likely option the same checkpoint
+  exits 34 / 60 (seed 0) and 29 / 60 (seed 2), 0.53 together against 0.42. Two seeds; the difference
+  is about 1.7 standard errors.
+
+Why agreement stops near 0.8 on the student's own trajectories (what was looked at)
+  * Label alignment and masks are right: driving with the stored labels reaches the exit (test),
+    replaying stored chunks reproduces the stored log-probabilities exactly with teacher-forced
+    manager choices (test), and no USE label fell on a step where the mask forbids it.
+  * By the teacher's steering mode, on teacher-driven steps (run 3 checkpoint, 10 minutes in):
+        slow (44 % of steps)   move 0.79  strafe 0.81  turn 0.74
+        look (26 %)            move 0.82  strafe 0.94  turn 0.96
+        run  (14 %)            move 0.83  strafe 0.93  turn 0.75
+        door (14 %)            move 0.91  strafe 0.94  turn 0.96
+    The teacher steers with a look-ahead on stopping distance and with heading thresholds of one turn
+    step. Near those thresholds two keys are equally good, and the student cannot place the threshold
+    exactly; most disagreement is there.
+  * The value field was the bottleneck of the first attempt. With field_coef 1 the squared error of
+    the field (0.04) carried almost no gradient next to the cross-entropies: the learned field named
+    the same best neighbouring cell as the teacher's on 24 % of manager steps (8 neighbours, chance
+    12 %). With field_coef 10: 62 %, error 0.014, and the target pointer learned faster (exact target
+    0.47 against 0.39 after about six minutes).
+  * The manager does condition the controller, but most steps are decided by the sensors: replaying
+    teacher-driven steps with the target mirrored through the crop centre lowers agreement from
+    0.868 to 0.846, with another sub-goal to 0.858.
+
+Earlier runs of the same evening
+  * Run 2 (field_coef 1), stopped after 6.5 minutes and 283 k steps: 22 / 60 alone.
+  * Run 3 (this config, 25 minutes, 1.27 M steps): in-training numbers as above. Its evaluation is
+    not comparable: submission/doomnet/memory.py, model.py and odometry.py and training/teacher/core.py
+    were edited between its start and its evaluation, and the same checkpoint then gave 17 / 60
+    (all 60 maps) and 34 / 60 (tier 2 x 3). Run 4, reported above, was repeated from a frozen copy.
+
+Throughput with labels on
+  Workers alone (random actions, no network, 6 workers x 16 environments): 4,069 and 4,170 steps/s
+  without labels, 3,636 and 3,692 with: 11 % less. Per environment step the label and its storage
+  cost 0.34 ms of 2.5 ms (machine at load average 67).
+  Whole loop in the reported run: 1,280 environment steps/s on average (2,844 while collecting; the
+  PPO update takes 55 % of the time; learner 9,300 samples/s). No environment reset, no odometry
+  error and no teacher error in 1.5 M steps.
+
+Export
+  training.rl.export wrote the checkpoint with the agent's save_weights (provenance record "ok");
+  a DoomAgent pointed at that file, without DOOMNET_ALLOW_UNTRAINED, started with 0 warm-up failures
+  and played one 525-step episode of dev_nav_v1_t2_000 with 0 failed decisions (no exit on that map;
+  the agent uses the exit detector network, training used the labelled exit observation).
+
+Starting from a combat checkpoint (unified_full settings on the laptop: 40 % tier 0, 60 % arenas)
+  At the first update the heads' cross-entropy is 42 and the field error 18.7, and the policy's joint
+  log-probability on its own steps without controller labels (fights, maps without labels; manager
+  choices included) moves by KL 6.1 in that one update. Two runs from the same combat checkpoint,
+  then the policy alone on the held-out arenas of dev_v1 (tier 1; 60 episodes on the same 17 maps,
+  training.rl.play):
+
+                                                           kills per episode   kills / monsters   deaths
+   combat checkpoint as it was                                1.45 +- 0.24          0.31            0.82
+   4 minutes (270 k steps) of the unified run, no limit        2.95 +- 0.29          0.68            0.48
+   6 minutes (578 k steps) with ppo.lr_warmup 20 and
+     ppo.target_kl_unlabelled 0.02 (unified_combat_keep.csv)  2.92 +- 0.30          0.65            0.65
+
+  The large first step did not cost the fighting, and the limit bought nothing: it cut the updates
+  to 2-8 of 18 minibatches for the first 80 iterations, and at equal steps (270 k) the limited run
+  was behind on the teacher terms (heads' cross-entropy 1.94 against 1.72, in-training agreement
+  0.80 against 0.82). The unified configs therefore leave both settings off.
+  Both unified runs fight better than the checkpoint they started from within minutes. The checkpoint
+  was trained before the latest edits to the memory map, odometry and network files and carries no
+  provenance record, so part of that gap may be the checkpoint meeting inputs it was not trained on.
