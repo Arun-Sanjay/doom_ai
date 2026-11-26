@@ -1,0 +1,79 @@
+{
+  "rollout": 64,
+  "workers": 64,
+  "envs_per_worker": 24,
+  "total_steps": 300000000,
+  "checkpoint_every": 25,
+  "stats_window": 1000,
+  "heldout_every": 150,
+  "heldout_envs": 384,
+  "heldout_workers": 16,
+  "ppo": {
+    "bootstrap_on_truncation": false,
+    "epochs": 3,
+    "minibatch_chunks": 256,
+    "lr": 0.0002,
+    "lr_final": 0.2,
+    "distill_coef": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      0.5
+    ],
+    "field_coef": 10.0,
+    "field_gamma": 0.95
+  },
+  "vec": {
+    "teacher": "real",
+    "reward": {
+      "hit_bonus": 0.05
+    }
+  },
+  "teach": {
+    "beta_start": 0.15,
+    "beta_floor": 0.1,
+    "beta_steps": 5000000
+  },
+  "distill": {
+    "levels": [
+      0.25,
+      0.1,
+      0.03,
+      0.0
+    ],
+    "tolerance": 0.06,
+    "patience": 2,
+    "min_rate": 0.3
+  },
+  "curriculum": {
+    "stages": [
+      {
+        "name": "gauntlet",
+        "weights": [
+          0.05,
+          0.15,
+          0.2,
+          0.25,
+          0.35
+        ],
+        "focus": [
+          4
+        ],
+        "threshold": 2.0,
+        "max_steps": 30000000
+      }
+    ],
+    "adaptive_tiers": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "adaptive_floor": 0.3
+  },
+  "learner_threads": 192
+}

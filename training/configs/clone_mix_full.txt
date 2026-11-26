@@ -1,0 +1,11 @@
+clone_mix_full.json: a clone of the second-phase run on its own machine (128 CPU threads), started from the main
+run's checkpoint at 125M steps with the main run's settings.
+
+Maps: half organizer-style (data/maps/train_ref_v1: only the three monsters and the stimpack of the organizers'
+test maps, an exit on every map) and half the main run's own maps, tier by tier. An earlier clone on a 70/30
+mix gained on organizer-style dev maps (+4 against the main run) but lost the long-route tier 4 maps with heavy
+monsters (wide dev -11, beyond noise), so this one keeps half of the main distribution.
+
+Machine settings only: 64 workers x 24 environments (the same 1,536 environments and update size as the main
+run, so the schedules match) and learner_threads 192, because the trainer's main process does parallel CPU work
+and this machine's default of 64 threads held collection to a quarter of the first machine's rate.
