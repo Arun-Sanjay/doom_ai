@@ -222,3 +222,11 @@ _vizdoom.ini
 
 # Local validator / scorer artifacts
 *.lmp
+
+# Secrets (safety net; real keys live outside the repo)
+*.env
+.env.*
+
+# Generated training data, maps, logs and run outputs (weights that ship go in submission/weights via LFS)
+/data/
+/runs/

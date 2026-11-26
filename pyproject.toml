@@ -12,7 +12,11 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "pillow>=13.0.0",
+    "pytest>=8",
+    "torch==2.15.0",
+]
 
 [tool.uv.sources]
 doom-env = { path = "env", editable = true }
