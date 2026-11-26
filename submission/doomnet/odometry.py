@@ -49,6 +49,20 @@ Position, wedged steps
 There is no search and no inverse trigonometry here: correspondences are nearest neighbours
 between two 64-point scans, and everything else is closed-form arithmetic.
 
+Failures
+    `update` does not raise on anything an observation can hold. The heading and the free-motion
+    prediction need only the buttons. Everything that reads the observation runs under one guard:
+    if it raises, or a measured displacement is not a finite number, the step keeps the model's
+    answer (the prediction, corrected by the reported momentum if that was readable), the stored
+    scan is dropped and the step is counted in `Odometry.errors`. The counter is 0 on every map
+    the tests run, so a real fault shows there instead of clearing the agent's state mid-map.
+    `errors` and `last_error` are for the current map and start again at `reset()`.
+    `errors_total` and `last_error_total` are for the whole life of the object and are what a
+    training log or an evaluation report should read: they need no bookkeeping around `reset()`.
+    So that a failure is seen even where nobody reads those fields, the 1st, 10th, 100th, ...
+    failure of the process (`Odometry.process_errors`, all objects together) is printed to
+    stderr as one line.
+
 Purpose: turn (previous action, observation) into the pose (x, y, theta) in the start frame.
 Shapes: prev_action (9,), obs["vitals"] (17,), obs["rays"]["distance"] (64,), obs["rays"]["hit_type"] (64,) -> x, y, theta floats.
 Why: the heading follows exactly from the buttons, free motion from the known friction model, and the rays measure the few steps the model cannot predict, so drift stays at about one unit per episode on grid maps.
@@ -57,6 +71,7 @@ Why: the heading follows exactly from the buttons, free motion from the known fr
 from __future__ import annotations
 
 import math
+import sys
 
 import numpy as np
 
@@ -120,6 +135,7 @@ _COS_L, _SIN_L = COS.tolist(), SIN.tolist()   # Python floats for the scalar pat
 RAY_OFFSETS = np.arange(spec.NUM_RAYS) * RAY_STEP          # heading units of ray k relative to the heading
 _NEXT = (np.arange(spec.NUM_RAYS) + 1) % spec.NUM_RAYS
 _PREV = (np.arange(spec.NUM_RAYS) - 1) % spec.NUM_RAYS
+_THIS_FILE = (lambda: 0).__code__.co_filename               # as tracebacks name this file
 
 
 def heading_index(theta: float) -> int:
@@ -140,7 +156,12 @@ class Odometry:
     action that produced `obs` (not for the first observation of an episode, which has no action).
     """
 
+    process_errors = 0                # failed measurements of every object of this process (kept on the class)
+    ANNOUNCE_AT = (1, 10, 100, 1000, 10_000, 100_000, 1_000_000)        # which of them are printed to stderr
+
     def __init__(self):
+        self.errors_total = 0         # failed measurements since this object was built: `reset()` keeps it
+        self.last_error_total = ""    # the last of them, with the step of its map: "step 212: TypeError at line ..."
         self.reset()
 
     def reset(self) -> None:
@@ -156,7 +177,9 @@ class Odometry:
         self._scan = None             # previous scan, see _make_scan
         self.disturbed_steps = 0      # steps whose displacement was measured instead of predicted
         self.last_mode = "free"       # how the last step's displacement was obtained (for tests and logs):
-                                      # free | rays | rays+slide | rays+body | rays+model | model
+                                      # free | rays | rays+slide | rays+body | rays+model | model | error
+        self.errors = 0               # steps of this map whose measurement failed and kept the model's answer (0 in
+        self.last_error = ""          # normal use), and what the last such failure was; totals: see __init__
 
     @property
     def pose(self) -> tuple[float, float, float]:
@@ -209,47 +232,76 @@ class Odometry:
         self.step += 1
         self.last_mode = "free"
 
-        rays = obs["rays"]
-        dist, hit = ray_ranges(rays["distance"]), np.asarray(rays["hit_type"])
-        vitals = obs["vitals"]
-        vf, vr = float(vitals[14]), float(vitals[15])
-        if not (abs(vf) <= MAX_SPEED and abs(vr) <= MAX_SPEED):      # NaN, inf or absurd: keep the prediction
-            self.x += dx
-            self.y += dy
-            self._mx, self._my = mx, my
-            self._scan = None
-            return
-        c, s = _COS_L[h], _SIN_L[h]
-        ox, oy = vf * c + vr * s, vf * s - vr * c                   # reported momentum in the start frame
-        rx, ry = ox - mx, oy - my                                   # mismatch with the prediction
-        scan, new = self._scan, _make_scan(dist, hit, h)
-        if rx * rx + ry * ry < FREE_TOL * FREE_TOL:
-            # Free step. The small remainder is thrust the model placed a hair off (the engine rounds
-            # the thrust direction to 1/8192 of a circle); spread it over the step as a constant force.
-            dx += FORCE_GAIN * rx
-            dy += FORCE_GAIN * ry
-            # Wedged? Only possible if the step ends with a wall of the previous scan within reach.
-            if scan is not None and scan[3] < CHECK_RADIUS + abs(dx) + abs(dy):
-                ex, ey = scan[4] - dx, scan[5] - dy
-                if float((ex * ex + ey * ey).min()) < CHECK_RADIUS * CHECK_RADIUS:
-                    match = _ScanMatch(scan, new)
-                    if not match.empty and match.outliers(dx, dy) > MAX_OUTLIERS * match.count:
-                        tx, ty = self._measure(match, dx, dy, 0.0, 0.0, m0x, m0y, ax, ay, ox, oy, True)
-                        if (tx - dx) ** 2 + (ty - dy) ** 2 < CONFIRM_TOL * CONFIRM_TOL:
-                            self.last_mode = "free"
-                        else:
-                            dx, dy = tx, ty
-                            self.disturbed_steps += 1
-        else:
-            self.disturbed_steps += 1
-            if scan is None:
-                dx, dy = dx + FORCE_GAIN * rx, dy + FORCE_GAIN * ry
-                self.last_mode = "model"
-            else:
-                dx, dy = self._measure(_ScanMatch(scan, new), dx, dy, rx, ry, m0x, m0y, ax, ay, ox, oy, False)
-        self.x += dx
-        self.y += dy
-        self._mx, self._my = ox, oy
+        # ---- correction from the observation ------------------------------------------------------
+        # (tx, ty), (ux, uy) and `new` are the step's displacement, the momentum after it and the scan
+        # to keep. They start as the pure prediction and are replaced as the observation is read, so
+        # whatever fails below leaves the best answer reached so far in them.
+        tx, ty, ux, uy, new = dx, dy, mx, my, None
+        try:
+            vitals = obs["vitals"]
+            vf, vr = float(vitals[14]), float(vitals[15])
+            if abs(vf) <= MAX_SPEED and abs(vr) <= MAX_SPEED:           # else NaN, inf or absurd: keep the prediction
+                c, s = _COS_L[h], _SIN_L[h]
+                ox, oy = vf * c + vr * s, vf * s - vr * c               # reported momentum in the start frame
+                rx, ry = ox - mx, oy - my                               # mismatch with the prediction
+                # The model's answer given the reported momentum: the mismatch acted as a constant
+                # force over the step. On a free step that is the small remainder of thrust the model
+                # placed a hair off (the engine rounds the thrust direction to 1/8192 of a circle).
+                tx, ty, ux, uy = dx + FORCE_GAIN * rx, dy + FORCE_GAIN * ry, ox, oy
+                rays = obs["rays"]
+                scan, fresh = self._scan, _make_scan(ray_ranges(rays["distance"]), np.asarray(rays["hit_type"]), h)
+                if rx * rx + ry * ry < FREE_TOL * FREE_TOL:
+                    # Free step. Wedged? Only possible if it ends with a wall of the previous scan within reach.
+                    if scan is not None and scan[3] < CHECK_RADIUS + abs(tx) + abs(ty):
+                        ex, ey = scan[4] - tx, scan[5] - ty
+                        if float((ex * ex + ey * ey).min()) < CHECK_RADIUS * CHECK_RADIUS:
+                            match = _ScanMatch(scan, fresh)
+                            if not match.empty and match.outliers(tx, ty) > MAX_OUTLIERS * match.count:
+                                sx, sy = self._measure(match, tx, ty, 0.0, 0.0, m0x, m0y, ax, ay, ox, oy, True)
+                                if not math.isfinite(sx + sy):
+                                    raise FloatingPointError("measured displacement is not finite")
+                                if (sx - tx) ** 2 + (sy - ty) ** 2 < CONFIRM_TOL * CONFIRM_TOL:
+                                    self.last_mode = "free"
+                                else:
+                                    tx, ty = sx, sy
+                                    self.disturbed_steps += 1
+                elif scan is None:
+                    self.last_mode = "model"
+                    self.disturbed_steps += 1
+                else:
+                    sx, sy = self._measure(_ScanMatch(scan, fresh), dx, dy, rx, ry, m0x, m0y, ax, ay, ox, oy, False)
+                    if not math.isfinite(sx + sy):
+                        raise FloatingPointError("measured displacement is not finite")
+                    tx, ty = sx, sy
+                    self.disturbed_steps += 1
+                new = fresh
+        except Exception as exc:  # noqa: BLE001 - last line of defence: the pose must survive any observation
+            self.errors += 1
+            self.errors_total += 1
+            Odometry.process_errors += 1
+            self.last_mode = "error"
+            new = None
+            try:                                                # the note: writing it cannot cost the step
+                tb, line = exc.__traceback__, 0
+                for _ in range(8):                              # the deepest line of this file on the way to the fault
+                    if tb is not None:                          # (at most five of its frames lie between here and there)
+                        if tb.tb_frame.f_code.co_filename == _THIS_FILE:
+                            line = tb.tb_lineno
+                        tb = tb.tb_next
+                self.last_error = f"{type(exc).__name__} at line {line}: {exc}"
+            except Exception:  # noqa: BLE001 - an exception that cannot be described keeps its name
+                self.last_error = type(exc).__name__
+            self.last_error_total = f"step {self.step}: {self.last_error}"
+            if Odometry.process_errors in Odometry.ANNOUNCE_AT:
+                try:
+                    print(f"[doomnet] odometry: measurement failure {Odometry.process_errors} of this process, at step {self.step} "
+                          f"of its map: {self.last_error}. The step kept the motion model's answer and the map goes on; failures "
+                          "are counted in Odometry.errors_total and printed at the 1st, 10th, 100th, ...", file=sys.stderr, flush=True)
+                except Exception:  # noqa: BLE001 - a log line that cannot be written changes nothing
+                    pass
+        self.x += tx
+        self.y += ty
+        self._mx, self._my = ux, uy
         self._scan = new
 
     # ------------------------------------------------------------------------------------------
@@ -439,7 +491,8 @@ def _wall_slide(mn, mt, an, at, dn_seen, on, ot):
     and without a later stop. The contact share f is taken once from dn_seen and once from the
     reported momentum along the wall (the second is sharper when the body drifts into the wall
     slowly); the candidate that best reproduces both the measured approach and the reported
-    momentum wins.
+    momentum wins. A candidate for which `_slide_run` reports "not pressed" is not a possible
+    history of the step and is skipped.
     """
     best, best_cost, stopped = None, SLIDE_ACCEPT, False
     for j in range(4):
@@ -455,14 +508,18 @@ def _wall_slide(mn, mt, an, at, dn_seen, on, ot):
                 f = SLIDE_FUDGE + (dn_seen - dn0) / wn_j        # dn is linear in f above the fudge share
                 if -0.1 <= f <= 1.1:
                     shares.append(min(max(f, 0.0), 1.0))
-                if stop < 0:
-                    slope = _slide_run(mn, mt, an, at, j, 0.5)[3] - ut0      # so is the final momentum along the wall
+                half = _slide_run(mn, mt, an, at, j, 0.5) if stop < 0 else None
+                if half is not None:
+                    slope = half[3] - ut0                       # so is the final momentum along the wall
                     if abs(slope) > 1e-9:
                         f = SLIDE_FUDGE + (ot - ut0) * (0.5 - SLIDE_FUDGE) / slope
                         if -0.02 <= f <= 1.02:
                             shares.append(min(max(f, 0.0), 1.0))
             for f in shares:
-                dn, dt, un, ut, _ = _slide_run(mn, mt, an, at, j, f, stop)
+                run = _slide_run(mn, mt, an, at, j, f, stop)
+                if run is None:                                 # a share below the fudge share leaves a smaller gap, and
+                    continue                                    # the body is then not pressed at the stop tic: no such step
+                dn, dt, un, ut, _ = run
                 cost = ((un - on) ** 2 + (ut - ot) ** 2) / SLIDE_MOMENTUM_TOL ** 2 + ((dn - dn_seen) / SLIDE_APPROACH_TOL) ** 2
                 if stop >= 0:
                     cost *= STOP_PENALTY
