@@ -1,0 +1,11 @@
+clone_ref.json: a clone of the second-phase run, resumed from a copy of its checkpoint at about 105M steps,
+with the same settings (only the worker count differs: 48 x 12 beside the main run) and a different map set.
+
+Maps: 70% from data/maps/train_ref_v1 (generator profiles "reference" and "reference_wide": only the three
+monsters and the stimpack that appear in the organizers' own test maps, an exit on every map, long routes and
+dense fights in the wide half) and 30% from the main run's own set, mixed per tier.
+
+Why: on the organizer-style dev suite (training/suites/dev_ref_v1.jsonl) the agent on main exits 37 of 40
+normal maps but only 14 of 40 dense ones, where it dies in 20. The main run trains on maps with weapons and
+ammunition on the floor and with monsters the organizers' test maps never use. The clone is judged at the
+final pick like every other candidate; the main run is not touched.
