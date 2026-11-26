@@ -1,0 +1,5 @@
+clone_ref_full.json: the clone_ref run moved to its own machine at the main run's size (128 x 12).
+
+Same settings and map mix as clone_ref.json. At the main run's size an update is as large as the main run's, so
+the learning-rate and entropy schedules (counted in updates) sit where the main run's do; on 48 workers the clone
+ran with a learning rate 27% above the main run's. Resumed from the clone's own latest checkpoint.
