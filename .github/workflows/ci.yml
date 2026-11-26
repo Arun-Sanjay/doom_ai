@@ -1,0 +1,164 @@
+# Runs on every push and pull request, on a clean x86 Linux machine with the package versions of
+# the official evaluation image (docker/requirements.lock), CPU only:
+#   1. the rule-compliance lint of submission/            training/tests/test_rules.py
+#   2. the agent fuzz, slow tests included, held to the   training/tests/test_fuzz.py
+#      agent's 20 ms budget for this runner
+#   3. the fast unit tests of every other area            training/tests (everything not marked slow)
+#   4. the official validator with the untrained agent    validate.py --device cpu
+#      (only while no weights are committed)
+#   5. the agent's time per decision on this runner       training/bench/agent_latency.py
+#   6. submission readiness: the official validator run   validate.py --device cpu
+#      exactly as the scorer runs the agent
+# Steps 1 to 6 each run whatever happened in the steps before them, so one failing test file never
+# hides the lint, the fuzz, the validator or the latency number.
+# Step 6 is the one that says whether this commit could be handed in as it is. It is red when the
+# assembled agent has no weights in the commit, which every other step tolerates on purpose.
+# Local equivalents: replace `python` with `.venv/bin/python` and run from the repository root.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: lint, fuzz, tests, validator, latency, readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_PROGRESS_BAR: "off"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      # Downloads the Git LFS objects of this commit (the weights) on every run. Those downloads
+      # count against the account's Git LFS bandwidth, so keep large files that the agent does not
+      # load out of the tracked tree.
+      - name: Check out the repository with its Git LFS files
+        uses: actions/checkout@v6
+        with:
+          lfs: true
+
+      - name: Set up Python 3.13 with a pip cache
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: docker/requirements.lock
+
+      - name: Install the locked package versions (CPU build of torch)
+        id: install
+        run: |
+          # Versions are read from docker/requirements.lock, the lock file of the official image.
+          lock=docker/requirements.lock
+          torch=$(grep -E "^torch==" "$lock")
+          pins=()
+          for name in vizdoom gymnasium numpy pillow pygame-ce; do
+            pin=$(grep -E "^${name}==" "$lock")  # the step fails here if a package is missing from the lock
+            pins+=("$pin")
+          done
+          echo "From $lock: $torch ${pins[*]}"
+          python -m pip install "$torch" --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install "${pins[@]}" "pytest==9.2.0"
+          python -m pip install ./env
+          python -c "
+          import doom_env, gymnasium, numpy, torch, vizdoom
+          print('torch', torch.__version__, '| vizdoom', vizdoom.__version__, '| gymnasium', gymnasium.__version__, '| numpy', numpy.__version__)
+          print('contract', doom_env.CONTRACT_VERSION, '| CUDA available:', torch.cuda.is_available())"
+
+      - name: Check the committed weights
+        shell: python
+        run: |
+          # Weights live in submission/weights and come through Git LFS. A pointer file means LFS did
+          # not deliver them. With no weights at all the agent is built untrained in the steps that
+          # test and time it, and the run says so; the last step still fails such a commit.
+          import hashlib, os, pathlib, sys
+
+          files = sorted(p for p in pathlib.Path("submission/weights").rglob("*") if p.is_file() and p.name != ".gitkeep")
+          pointers = [p for p in files if p.read_bytes()[:64].startswith(b"version https://git-lfs")]
+          for p in pointers:
+              print(f"::error file={p}::{p} is a Git LFS pointer, not the weights file")
+          if pointers:
+              sys.exit(1)
+          lines = [f"{hashlib.sha256(p.read_bytes()).hexdigest()[:12]}  {p.stat().st_size:>10} bytes  {p}" for p in files]
+          if not files:
+              lines = ["No weights are committed under submission/weights: the agent runs UNTRAINED in this job."]
+              print("::warning::" + lines[0] + " A submission needs committed weights.")
+              with open(os.environ["GITHUB_ENV"], "a") as env:
+                  env.write("DOOMNET_ALLOW_UNTRAINED=1\n")
+          print("\n".join(lines))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("### Weights\n```\n" + "\n".join(lines) + "\n```\n")
+
+      - name: Rule-compliance lint of submission/
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: python -m pytest training/tests/test_rules.py -q
+
+      # The whole file, the 1,200-decision run included: no other step plays more than the 525
+      # decisions of the validator's map, and the longest maps have 1,050. The budget is the agent's
+      # target for this runner (20 ms mean per decision), so the fuzz fails on mean > 20 ms or
+      # p99 > 25 ms. Without the variable it would only enforce the scorer's 40 ms.
+      - name: Agent fuzz (all of it, held to 20 ms per decision)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        timeout-minutes: 4
+        env:
+          DOOMNET_FUZZ_BUDGET_MS: "20"
+        run: python -m pytest training/tests/test_fuzz.py -q -rs
+
+      # -x stops at the first failing file, which is why the lint and the fuzz have steps of their
+      # own. The fuzz has just run in full and is left out here.
+      - name: Unit tests (everything else not marked slow)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        timeout-minutes: 5
+        run: python -m pytest training/tests -q -x -m "not slow" -rs --deselect training/tests/test_fuzz.py
+
+      # DOOMNET_ALLOW_UNTRAINED=1 is set (see the weights step), so this shows that the pipeline plays
+      # a full episode within the limits before any weights exist. Once weights are committed the
+      # last step is the same run and this one is skipped.
+      - name: Official validator with the untrained agent (only while no weights are committed)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && env.DOOMNET_ALLOW_UNTRAINED == '1' }}
+        timeout-minutes: 3
+        run: python validate.py --device cpu
+
+      - name: Agent latency on this runner (mean, p95, max)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && hashFiles('training/bench/agent_latency.py') != '' }}
+        timeout-minutes: 3
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+        run: |
+          python training/bench/agent_latency.py | tee "$RUNNER_TEMP/agent_latency.txt"
+          { echo "### Agent latency on this runner"; echo '```'; cat "$RUNNER_TEMP/agent_latency.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      # The scorer never sets DOOMNET_ALLOW_UNTRAINED. Without it the agent has to find its weights
+      # in the commit, or its constructor raises and every map scores nothing. Forgetting to commit
+      # the weights is enough for that, and it is the one mistake the steps above cannot see.
+      - name: Submission readiness (the official validator, run exactly as the scorer runs the agent)
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        timeout-minutes: 3
+        run: |
+          status=0
+          env -u DOOMNET_ALLOW_UNTRAINED python validate.py --device cpu || status=1
+          if ! grep -q doomnet submission/agent.py; then
+            verdict="NOT A SUBMISSION YET: submission/agent.py is still the template placeholder (no weights are asked of it)"
+            echo "::notice title=Not a submission yet::submission/agent.py is still the template placeholder."
+          elif [ -z "$(find submission/weights -type f ! -name .gitkeep)" ]; then
+            verdict="NOT READY: submission/agent.py loads the doomnet networks, but no weights file is committed under submission/weights"
+            echo "::error title=No weights in this commit::$verdict. As it stands this commit cannot be scored."
+            status=1
+          elif [ "$status" -ne 0 ]; then
+            verdict="NOT READY: the validator fails when the agent is run as the scorer runs it (see the log of this step)"
+          else
+            verdict="READY: weights are committed and the validator passes without the untrained fallback"
+          fi
+          echo "$verdict"
+          { echo "### Submission readiness"; echo "$verdict"; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
