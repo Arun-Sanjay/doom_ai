@@ -1,0 +1,7 @@
+unified_wide.json: a wider twin of the unified run, trained from random initialisation.
+
+Same loop, maps (data/maps/train_v2) and losses as unified_full.json; the only architectural difference is
+the controller width: policy_kwargs {"hidden": 512} gives 2.27 M parameters against 1.31 M. It answers one
+question: is network size what limits the agent? It runs beside the main run with fewer workers (48 x 12),
+with compressed curriculum stages and more arenas early, because it has to learn combat from scratch too.
+It is scored on the same suites as the main run and replaces it only if it wins by more than noise.
