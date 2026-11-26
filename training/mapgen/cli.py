@@ -49,6 +49,24 @@ and these froze the two wide suites::
     python -m training.mapgen.cli --freeze training/suites/heldout_wide_v1.jsonl --profile wide --n 50 --tiers 1,2,3,4 --seed 9500000
     python -m training.mapgen.cli --freeze training/suites/dev_wide_v1.jsonl --profile wide --n 15 --tiers 1,2,3,4 --seed 8500000
 
+Write maps in the legend of the reference maps (`layouts.REFERENCE`: zombieman, imp and chaingunner
+as the only monsters, the stimpack as the only pickup, an exit on every map). `--profile reference`
+has the base sizes, `--profile reference_wide` the long routes of the wide profile with crowded
+rooms; both have tiers 1 to 4. A set of both is written in two steps, the second one extending the
+first (PART is any directory outside the set), and `--mix PROFILE:SEED` freezes a suite whose tiers hold `--n` maps of each profile, with
+the profile named in every row. These wrote `data/maps/train_ref_v1` and the two suites::
+
+    python -m training.mapgen.cli --out PART --profile reference \\
+        --n 225,375,375,525 --tiers 1,2,3,4 --seed 7200000 --randomize 0.5 \\
+        --start-quarter 0.5 --start-any 0.05 --start-offset 0.05
+    python -m training.mapgen.cli --out data/maps/train_ref_v1 --extend PART/manifest.jsonl \\
+        --profile reference_wide --n 225,375,375,525 --tiers 1,2,3,4 --seed 7300000 --randomize 0.5 \\
+        --start-quarter 0.5 --start-any 0.05 --start-offset 0.05
+    python -m training.mapgen.cli --freeze training/suites/dev_ref_v1.jsonl --profile reference --n 10 \\
+        --tiers 1,2,3,4 --seed 8700000 --mix reference_wide:8750000
+    python -m training.mapgen.cli --freeze training/suites/heldout_ref_v1.jsonl --profile reference --n 30 \\
+        --tiers 1,2,3,4 --seed 9700000 --mix reference_wide:9750000
+
 Print per-tier statistics of a manifest or suite (per profile when the rows name one; with
 `--profile` only the rows of that profile)::
 
@@ -205,12 +223,15 @@ def write_wads(maps: list[dict], out, profiles: bool = False, copied: list[dict]
     return manifest
 
 
-def _write_suite(path: Path, maps: list[dict]) -> list[dict]:
-    """Write `maps` as a suite file, named `<file stem>_t<tier>_<number within the tier>`."""
+def _write_suite(path: Path, maps: list[dict], profiles: bool = False) -> list[dict]:
+    """Write `maps` as a suite file, named `<file stem>_t<tier>_<number within the tier>`. With
+    `profiles` every row also names its layout profile, after the suite keys."""
     index: Counter = Counter()
     rows = []
     for m in maps:
         row = {k: m[k] for k in SUITE_KEYS}
+        if profiles:
+            row["profile"] = m.get("profile", "base")
         row["name"] = f"{path.stem}_t{row['tier']}_{index[row['tier']]:03d}"
         index[row["tier"]] += 1
         rows.append(row)
@@ -228,6 +249,24 @@ def freeze_suite(path, n, tiers, seed: int, strip: bool = False, profile: str = 
     if seed < RESERVED_SEED:
         raise ValueError(f"suite seeds start at {RESERVED_SEED}")
     return _write_suite(path, make_set(n, tiers, seed, randomize=0.0, exclude=frozen_grids(), strip=strip, profile=profile))
+
+
+def freeze_mixed_suite(path, n, tiers, parts, strip: bool = False) -> list[dict]:
+    """Write a new suite file whose tiers each hold `n` maps of every (profile, seed) of `parts`, in
+    that order: the first `n` maps of a tier are of the first profile, the next `n` of the second.
+    Reference dialect, no grid twice, every row names its profile. Never overwrites."""
+    path = Path(path)
+    if path.exists():
+        raise FileExistsError(f"{path} is frozen: suites are written once and never regenerated")
+    if min(seed for _, seed in parts) < RESERVED_SEED:
+        raise ValueError(f"suite seeds start at {RESERVED_SEED}")
+    exclude, maps = frozen_grids(), []
+    for profile, seed in parts:
+        part = make_set(n, tiers, seed, randomize=0.0, exclude=exclude, strip=strip, profile=profile)
+        exclude |= {grid_hash(m["grid"]) for m in part}
+        maps += part
+    maps.sort(key=lambda m: list(tiers).index(m["tier"]))          # stable: profiles stay in order inside a tier
+    return _write_suite(path, maps, profiles=True)
 
 
 def derive_suite(path, source, tiers=None, strip: bool = False) -> list[dict]:
@@ -378,10 +417,14 @@ def main(argv=None) -> None:
                          "flag gives the start pose its own draw on every map; the flags left out then take "
                          f"{START_DEFAULTS[0]}, {START_DEFAULTS[1]} and {START_DEFAULTS[2]}. With none of them the "
                          "start is randomised with the looks, as in the first training set")
-    ap.add_argument("--profile", choices=layouts.PROFILES,
+    ap.add_argument("--profile", choices=layouts.ALL_PROFILES,
                     help="layout profile of the maps this command generates (default: base). 'wide' has wider "
-                         "limits, see layouts.WIDE; the manifest rows then name their profile. With --stats and "
-                         "--verify: only the rows of this profile")
+                         "limits, see layouts.WIDE; 'reference' and 'reference_wide' keep to the legend of the "
+                         "reference maps, see layouts.REFERENCE; the manifest rows then name their profile. With "
+                         "--stats and --verify: only the rows of this profile")
+    ap.add_argument("--mix", metavar="PROFILE:SEED",
+                    help="with --freeze: every tier also gets --n maps of this profile from this seed, after those "
+                         "of --profile; the suite rows then name their profile")
     ap.add_argument("--extend", metavar="MANIFEST",
                     help="training sets: first copy the maps of this manifest (rows and WAD files, unchanged) into "
                          "--out, then add the generated maps; the rows name their profile")
@@ -402,12 +445,20 @@ def main(argv=None) -> None:
         n = [int(v) for v in args.n.split(",")]
     except ValueError:
         ap.error("--n is a number or a comma-separated list of numbers")
-    all_tiers = sorted(layouts.WIDE["size"]) if profile == "wide" else sorted(layouts.TIERS)
+    all_tiers = sorted(layouts.WIDE["size"]) if profile != "base" else sorted(layouts.TIERS)
     if min(n) < 0 or (len(n) > 1 and len(n) != len(tiers or all_tiers)):
         ap.error("--n takes one number, or one number for every tier of --tiers")
     n = n[0] if len(n) == 1 else n
-    if profile == "wide" and not set(tiers or all_tiers) <= set(all_tiers) and not (args.stats or args.verify or args.from_suite):
-        ap.error("the wide profile has tiers 1 to 4")
+    if profile != "base" and not set(tiers or all_tiers) <= set(all_tiers) and not (args.stats or args.verify or args.from_suite):
+        ap.error(f"the {profile} profile has tiers 1 to 4")
+    mix = None
+    if args.mix:
+        name, _, mix_seed = args.mix.partition(":")
+        if name not in layouts.ALL_PROFILES or not mix_seed.isdigit() or not args.freeze or args.from_suite:
+            ap.error("--mix PROFILE:SEED names a layout profile and a seed, for --freeze without --from-suite")
+        if name != "base" and not set(tiers or all_tiers) <= set(layouts.WIDE["size"]):
+            ap.error(f"the {name} profile has tiers 1 to 4")
+        mix = (name, int(mix_seed))
     if args.from_suite and (args.profile or args.extend):
         ap.error("--profile and --extend apply to generated maps, not to --from-suite")
     if args.extend and (args.freeze or args.strip_monsters):
@@ -433,10 +484,12 @@ def main(argv=None) -> None:
     if args.freeze:
         if args.from_suite:
             rows = derive_suite(args.freeze, args.from_suite, tiers, args.strip_monsters)
+        elif mix:
+            rows = freeze_mixed_suite(args.freeze, n, tiers or all_tiers, ((profile, args.seed), mix), args.strip_monsters)
         else:
             rows = freeze_suite(args.freeze, n, tiers or all_tiers, args.seed, args.strip_monsters, profile)
         print(f"froze {len(rows)} maps in {args.freeze}")
-        print(tier_stats(rows))
+        print(profile_stats(rows) if mix else tier_stats(rows))
         print("entry for checksums.json:", json.dumps({Path(args.freeze).name: suite_checksums(args.freeze)}))
         return
     if not args.out:

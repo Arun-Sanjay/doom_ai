@@ -28,5 +28,15 @@
     "maps": 200,
     "file_sha256": "4a04fe3c850acee4b69e8f7f991f5e41dba10e6011a5a34c85ab93b6e1059aa1",
     "wads_sha256": "11041a92be67d68d34d1b4a3ca2b7960aafa1a808a393fe3c3a492358c561715"
+  },
+  "dev_ref_v1.jsonl": {
+    "maps": 80,
+    "file_sha256": "528abcacff199163f3b24df9378b632d0c18d2cb06ad3d948e2f62a98c9a6c2e",
+    "wads_sha256": "f39089fa347dca07f1c677294049be80a17d7346950c49da65c3e148ff5016f8"
+  },
+  "heldout_ref_v1.jsonl": {
+    "maps": 240,
+    "file_sha256": "2954f249fff70cadf1a020541bcb4f4baeb04678e8a29d4a25ce6f363a6e35c4",
+    "wads_sha256": "7a26b6f38a528dd5aa1fe3df953454793befbcc88430c2deb679a83bbab409e3"
   }
 }

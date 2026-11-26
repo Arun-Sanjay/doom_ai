@@ -131,6 +131,48 @@ WIDE = dict(
 )
 
 
+# The "reference" profiles hold a map to the legend seen in the reference maps (maps/, tests/fixtures/):
+# the only monsters are zombieman, imp and chaingunner, the only pickup is the stimpack, and every
+# map has an exit pad, the tier 1 arenas included. Keys, doors, carvers and checks are those of the
+# other profiles. "reference" keeps the base sizes and tick caps, "reference_wide" those of `WIDE`
+# (long routes under a tight cap) with crowded rooms. They are profiles of their own next to
+# `PROFILES`, with random streams of their own, so "base" and "wide" give the maps they always gave.
+#   wide           the limits of `WIDE` apply (size, budget, exit and key distance, lock span)
+#   mix            monster kinds and weights per tier
+#   monsters       per tier (cap, allowance of a small map, open cells per further monster)
+#   least          fewest monsters drawn per tier, and fewest a finished map may hold
+#   free           share of the maps of a tier without any monster
+#   monster_draws  the number on a map is the largest of this many draws
+#   hp_per_cell    cap on total monster health per open cell
+#   pickups        the symbols a map may hold besides keys
+REFERENCE_PROFILES = ("reference", "reference_wide")
+ALL_PROFILES = PROFILES + REFERENCE_PROFILES
+REFERENCE = {
+    "reference": dict(
+        wide=False,
+        mix={1: (("z", 40), ("i", 40), ("c", 20)), 2: (("z", 50), ("i", 35), ("c", 15)),
+             3: (("z", 35), ("i", 40), ("c", 25)), 4: (("z", 22), ("i", 40), ("c", 38))},
+        monsters={1: (12, 2, 9), 2: (6, 2, 60), 3: (8, 3, 50), 4: (16, 6, 30)},
+        least={1: 1, 2: 1, 3: 1, 4: 4},
+        free={2: 0.35},
+        monster_draws=1,
+        hp_per_cell={1: 8, 2: 4, 3: 5, 4: 9},
+        pickups="h",
+    ),
+    "reference_wide": dict(
+        wide=True,
+        mix={1: (("z", 30), ("i", 40), ("c", 30)), 2: (("z", 40), ("i", 40), ("c", 20)),
+             3: (("z", 25), ("i", 40), ("c", 35)), 4: (("z", 14), ("i", 40), ("c", 46))},
+        monsters={1: (16, 4, 7), 2: (14, 4, 20), 3: (16, 5, 20), 4: (24, 8, 14)},
+        least={1: 4, 2: 3, 3: 4, 4: 8},
+        free={},
+        monster_draws=2,
+        hp_per_cell={1: 12, 2: 8, 3: 9, 4: 14},
+        pickups="h",
+    ),
+}
+
+
 class Reject(Exception):
     """A draft could not be finished; `generate` moves on to the next attempt of the same seed."""
 
@@ -838,14 +880,25 @@ def place_doors(g: Grid, rng: random.Random, density: float) -> int:
 
 
 def place_monsters(g: Grid, rng: random.Random, tier: int, start, most=MONSTER_COUNT,
-                   hp_per_cell=MONSTER_HP_PER_CELL, draws: int = 1) -> list[tuple[int, int]]:
+                   hp_per_cell=MONSTER_HP_PER_CELL, draws: int = 1, mix=MONSTER_MIX,
+                   least: dict | None = None, free=MONSTER_FREE) -> list[tuple[int, int]]:
     """Scatter monsters away from the start. In tiers 3 and 4 some guard a key or the exit, and in
     tier 4 some wait beside doors. A share `MONSTER_FREE` of the tier 2 maps gets none. Returns the
     cells whose monster gets the ambush flag. `most` and `hp_per_cell` are the caps on the number of
     monsters and on their total health per open cell (those of the base profile unless given); in
-    tiers 2 to 4 the number of monsters is the largest of `draws` draws up to the cap."""
+    tiers 2 to 4 the number of monsters is the largest of `draws` draws up to the cap.
+
+    `mix`, `least` and `free` are set by the reference profiles only: the monster kinds with their
+    weights per tier, the fewest monsters drawn per tier (the arenas of tier 1 then follow `most`
+    like the other tiers) and the share of monster-free maps per tier."""
     area = len(g.open_cells())
-    if tier == 1:
+    if least is not None:
+        cap, small, per = most[tier]
+        if rng.random() < free.get(tier, 0.0):
+            count = 0
+        else:
+            count = max(rng.randint(least[tier], max(least[tier], min(cap, small + area // per))) for _ in range(draws))
+    elif tier == 1:
         count = rng.randint(2, max(3, min(12, area // 9)))
     else:
         cap, small, per = most[tier]
@@ -860,7 +913,7 @@ def place_monsters(g: Grid, rng: random.Random, tier: int, start, most=MONSTER_C
     budget = [hp_per_cell[tier] * area]                  # total monster health the map may hold
 
     def put(cell, flag_chance: float) -> None:
-        kinds = [(m, wgt) for m, wgt in MONSTER_MIX[tier]
+        kinds = [(m, wgt) for m, wgt in mix[tier]
                  if (m not in WIDE_MONSTERS or g.roomy(*cell)) and (MONSTER_HP[m] <= budget[0] or m == "z")]
         kind = pick(rng, kinds)
         budget[0] -= MONSTER_HP[kind]
@@ -929,6 +982,22 @@ def place_pickups(g: Grid, rng: random.Random, tier: int) -> None:
     for item in wanted:
         if floor:
             g.put(*floor.pop(), item)
+
+
+def place_reference_pickups(g: Grid, rng: random.Random, tier: int, kinds: str) -> None:
+    """The pickups of a reference profile: only the symbols of `kinds`, a few per map, more where
+    there are more monsters. A monster-free map gets one to three on about a third of the maps."""
+    floor = g.cells(FLOOR)
+    rng.shuffle(floor)
+    monsters = len(g.cells("".join(udmf.MONSTER_CHARS)))
+    if monsters:
+        most = {1: 1 + monsters // 2, 2: 2 + monsters // 4, 3: 3 + monsters // 4, 4: 2 + monsters // 6}[tier]
+        count = rng.randint(0, most)
+    else:
+        count = rng.randint(1, 3) if rng.random() < 0.35 else 0
+    for _ in range(count):
+        if floor:
+            g.put(*floor.pop(), rng.choice(kinds))
 
 
 # ---- assembly --------------------------------------------------------------------------------------
@@ -1017,9 +1086,11 @@ def tick_cap(rng: random.Random, tier: int, sol: Solution, budget: tuple[float, 
 def draft(tier: int, rng: random.Random, lock_counts=None, profile: str = "base") -> dict:
     """One attempt at a map of the given tier. Raises Reject if the attempt does not work out.
     `lock_counts` replaces the tier's own ((number of locks, weight), ...) when given, and
-    `profile` "wide" holds the draft to the limits of `WIDE` instead of the base ones."""
+    `profile` "wide" holds the draft to the limits of `WIDE` instead of the base ones. A profile of
+    `REFERENCE` takes its monsters and pickups from there and always has an exit."""
     spec = TIERS[tier]
-    wide = WIDE if profile == "wide" else None
+    ref = REFERENCE.get(profile)
+    wide = WIDE if profile == "wide" or (ref is not None and ref["wide"]) else None
     tight = wide is not None and tier >= 2               # long route, tick cap within the wide budget
     lo, hi = wide["size"][tier] if wide else spec["size"]
     w = rng.randint(lo, hi)
@@ -1033,7 +1104,7 @@ def draft(tier: int, rng: random.Random, lock_counts=None, profile: str = "base"
     if len(g.open_cells()) < spec["min_open"]:
         raise Reject("too little floor")
     start = place_start(g, rng)
-    has_exit = rng.random() < spec["exit_chance"]
+    has_exit = rng.random() < (1.0 if ref else spec["exit_chance"])
     locks: list[dict] = []
     exit_style = None
     if has_exit:
@@ -1051,14 +1122,19 @@ def draft(tier: int, rng: random.Random, lock_counts=None, profile: str = "base"
         place_doors(g, rng, density=rng.choice(spec["doors"]))
     g = g.trimmed()                                      # cell coordinates are final from here on
     start = g.cells(START)[0]
-    if wide:
-        if max(g.w, g.h) > wide["max_side"][tier]:
-            raise Reject("larger than the size range")
-        ambush = place_monsters(g, rng, tier, start, most=wide["monsters"], hp_per_cell=wide["hp_per_cell"],
-                                draws=wide["monster_draws"])
+    if wide and max(g.w, g.h) > wide["max_side"][tier]:
+        raise Reject("larger than the size range")
+    if ref:
+        ambush = place_monsters(g, rng, tier, start, most=ref["monsters"], hp_per_cell=ref["hp_per_cell"],
+                                draws=ref["monster_draws"], mix=ref["mix"], least=ref["least"], free=ref["free"])
+        place_reference_pickups(g, rng, tier, ref["pickups"])
     else:
-        ambush = place_monsters(g, rng, tier, start) if tier > 0 else []
-    place_pickups(g, rng, tier)
+        if wide:
+            ambush = place_monsters(g, rng, tier, start, most=wide["monsters"], hp_per_cell=wide["hp_per_cell"],
+                                    draws=wide["monster_draws"])
+        else:
+            ambush = place_monsters(g, rng, tier, start) if tier > 0 else []
+        place_pickups(g, rng, tier)
 
     grid = g.text()
     sol = solve(grid)
@@ -1072,7 +1148,7 @@ def draft(tier: int, rng: random.Random, lock_counts=None, profile: str = "base"
     counts = describe(grid, options)
     if tier >= 2 and counts["rooms"] + counts["doors"] + counts["dead_ends"] < 3:
         raise Reject("one plain room is not an exploration map")
-    if counts["monsters"] < MIN_MONSTERS[tier]:
+    if counts["monsters"] < (MIN_MONSTERS[tier] if ref is None else 0 if tier in ref["free"] else ref["least"][tier]):
         raise Reject("no room for the monsters")
     counts.update(route_cells=sol.path_cells, route_corners=sol.corners, route_doors=sol.doors_on_path,
                   optimal_steps=sol.optimal_steps,
@@ -1094,17 +1170,19 @@ def generate(tier: int, seed: int, profile: str = "base") -> dict:
 
     `profile` "wide" gives a different map for the same (tier, seed), drawn from a random stream of
     its own under the limits of `WIDE` (tiers 1 to 4 only); the result then carries
-    `"profile": "wide"`. The default, "base", is unchanged by the existence of the option."""
+    `"profile": "wide"`. The default, "base", is unchanged by the existence of the option. The
+    profiles of `REFERENCE` ("reference", "reference_wide") work the same way: tiers 1 to 4, a
+    stream of their own, and the result names its profile."""
     if tier not in TIERS:
         raise ValueError(f"unknown tier {tier}")
-    if profile not in PROFILES:
+    if profile not in ALL_PROFILES:
         raise ValueError(f"unknown profile {profile!r}")
     if profile == "base":
         stream, attempts = "mapgen-v1", MAX_ATTEMPTS
     elif tier not in WIDE["size"]:
-        raise ValueError(f"the wide profile has no tier {tier}")
+        raise ValueError(f"the {profile} profile has no tier {tier}")
     else:
-        stream, attempts = "mapgen-wide-v1", WIDE["attempts"]
+        stream, attempts = f"mapgen-{profile}-v1", WIDE["attempts"]
     lock_counts = KEY_STAGE_LOCKS if has_key_stage(tier, seed) else None
     for attempt in range(attempts):
         rng = random.Random(f"{stream}/{tier}/{seed}/{attempt}")

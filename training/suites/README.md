@@ -6,6 +6,8 @@
 | `dev_v1.jsonl` | 20 per tier 1-4 | 8,000,000 upwards | Quick checks during development. |
 | `heldout_nav_v1.jsonl` | 100 per tier 2-4 | the maps of `heldout_v1` | The same layouts and tick caps without monsters: navigation scored apart from combat. |
 | `dev_nav_v1.jsonl` | 20 per tier 2-4 | the maps of `dev_v1` | The same for quick checks. |
+| `heldout_ref_v1.jsonl` | 60 per tier 1-4 | 9,700,000 and 9,750,000 upwards | The legend of the reference maps (zombieman, imp, chaingunner, stimpack, always an exit): in every tier 30 maps of the `reference` profile, then 30 of `reference_wide` (long routes, crowded). Rows name their `profile`. |
+| `dev_ref_v1.jsonl` | 20 per tier 1-4 | 8,700,000 and 8,750,000 upwards | The same for quick checks: 10 and 10 per tier. |
 
 Each line is one map: `name`, `tier`, `seed`, `episode_ticks`, `style`, `exit_style`, `grid` (the ASCII
 layout), `options` (keyword arguments for `training.mapgen.udmf.build_wad`; only ambush flags are set,

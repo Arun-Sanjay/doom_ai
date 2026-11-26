@@ -215,6 +215,43 @@ As frozen, all 260 maps load and play without warnings, and the reference walker
 231 that have one (176 of the 200 held-out maps, 55 of the 60 development maps), using at most 66% of the
 tick cap.
 
+## The reference profiles
+
+The reference maps (the 13 grids of `tests/fixtures/` and `maps/two_rooms.wad`) use twelve symbols:
+`# . P E D R B r z i c h`. Their only monsters are the zombieman, the imp and the chaingunner, their
+only pickup is the stimpack, and they show no weapon, ammunition or armour. `--profile reference`
+and `--profile reference_wide` (in code `layouts.REFERENCE`) hold generated maps to that:
+
+| | `reference` | `reference_wide` |
+|---|---|---|
+| Sizes, tick cap, exit and key distances | base profile | wide profile (tiers 2-4: cap 1.5 to 3 times the route cost) |
+| Monsters | `z`, `i`, `c` only | `z`, `i`, `c` only, more chaingunners |
+| Number of monsters, tiers 1 / 2 / 3 / 4 | 1-12 / 0-6 / 1-8 / 4-16 | 4-16 / 3-14 / 4-16 / 8-24, the larger of two draws |
+| Monster-free maps | 35% of tier 2 | none |
+| Pickups | stimpacks only | stimpacks only |
+| Exit | every map, the tier 1 arenas included | every map |
+
+Keys, locked doors (three colours, cards and skulls), ordinary doors, carvers, the solver checks and
+the randomised looks are those of the other profiles. Both have tiers 1 to 4 and random streams of
+their own; `layouts.PROFILES` and the maps of "base" and "wide" are unchanged (pinned digests in
+`training/tests/test_mapgen_reference.py`).
+
+`data/maps/train_ref_v1` (3,000 maps: 450, 750, 750 and 1,050 in tiers 1 to 4, half of every tier
+from each profile, seeds 7,200,000 to 7,200,524 and 7,300,000 to 7,300,524) and the two frozen
+suites `dev_ref_v1` and `heldout_ref_v1` were written with
+
+    python -m training.mapgen.cli --out PART --profile reference --n 225,375,375,525 --tiers 1,2,3,4 --seed 7200000 --randomize 0.5 --start-quarter 0.5 --start-any 0.05 --start-offset 0.05
+    python -m training.mapgen.cli --out data/maps/train_ref_v1 --extend PART/manifest.jsonl --profile reference_wide --n 225,375,375,525 --tiers 1,2,3,4 --seed 7300000 --randomize 0.5 --start-quarter 0.5 --start-any 0.05 --start-offset 0.05
+    python -m training.mapgen.cli --freeze training/suites/dev_ref_v1.jsonl --profile reference --n 10 --tiers 1,2,3,4 --seed 8700000 --mix reference_wide:8750000
+    python -m training.mapgen.cli --freeze training/suites/heldout_ref_v1.jsonl --profile reference --n 30 --tiers 1,2,3,4 --seed 9700000 --mix reference_wide:9750000
+
+where PART is any directory outside the set. `--mix PROFILE:SEED` gives every tier of a frozen suite
+`--n` more maps of a second profile after those of `--profile`, and the suite rows then carry a
+`profile` field. As written, the solver finds every one of the 3,320 maps solvable with its exit
+reachable; in the engine all 320 suite maps and every tenth map of the training set load and play
+without warnings, and the reference walker reaches the exit on each of them (at most 65% of the
+tick cap).
+
 ## Randomisation
 
 `--randomize P` builds a fraction P of the maps with random options: the player start is rotated
