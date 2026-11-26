@@ -60,10 +60,25 @@ class RewardCoef:
     ammo_cost: float = 0.002        # per shot fired that hit no monster
     reversal_cost: float = 0.05     # per door reversal
     hit_bonus: float = 0.0          # optional shaping per shot that hits a monster (off: not in the score)
+    fist_cost: float = 0.0          # per decision on the melee slot while bullets are held (off by default); booked under "ammo"
     door_open_height: float = 56.0  # a door counts as opened when its sector opening reaches this
     reversal_window: int = 6        # decision steps after a door starts to rise
     unknown_monsters: int = 8       # totals assumed when the map's things cannot be read
     unknown_keys: int = 1
+
+
+def fist_charge(vitals, fist_cost: float) -> float:
+    """Cost of this decision for standing on the melee slot while a loaded gun is held.
+
+    vitals: the observation's vitals (index 2 selected weapon slot, index 4 bullets). The pistol is
+    always owned, so bullets in reserve mean a loaded gun is one weapon press away. Returns
+    ``fist_cost`` when slot 1 is selected and bullets are held, and 0 otherwise: in particular 0
+    when the agent is out of bullets and the engine itself has put the fist up.
+    """
+    if vitals is None or fist_cost <= 0.0:
+        return 0.0
+    on_melee = int(round(float(vitals[2]))) == spec.MELEE_WEAPON_SLOT
+    return float(fist_cost) if (on_melee and float(vitals[4]) > 0.0) else 0.0
 
 
 class SectorIndex:
@@ -159,7 +174,7 @@ class RewardTracker:
                 - np.asarray(priv["sector_floor"], np.float64)[self.door_ids])
 
     # ------------------------------------------------------------------------------------------
-    def step(self, priv: dict, action=None, ammo: float | None = None) -> tuple[float, np.ndarray]:
+    def step(self, priv: dict, action=None, ammo: float | None = None, vitals=None) -> tuple[float, np.ndarray]:
         """Reward of the transition that led to ``priv``. Returns (total, per-term array)."""
         c = self.coef
         terms = np.zeros(len(TERMS), np.float64)
@@ -218,6 +233,7 @@ class RewardTracker:
         if fired and new_hits == 0 and terms[T["kill"]] == 0:
             terms[T["ammo"]] = -c.ammo_cost
         terms[T["hit"]] = c.hit_bonus * new_hits
+        terms[T["ammo"]] -= fist_charge(vitals, c.fist_cost)
         self.hits, self.ammo = hits, ammo
 
         self.done = bool(priv.get("finished") or priv.get("exit_reached") or priv.get("dead"))

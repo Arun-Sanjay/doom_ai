@@ -336,7 +336,7 @@ class EnvSlot:
         if self.native:
             reward = float(env_reward)
         else:
-            reward, terms = self.reward.step(priv, action, _total_ammo(obs))
+            reward, terms = self.reward.step(priv, action, _total_ammo(obs), obs["vitals"])
             self.terms += terms
         done = bool(terminated or truncated)
         reward_int, r_new, r_visit = self._observe(obs, action, priv, final=done)

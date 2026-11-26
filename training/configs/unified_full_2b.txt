@@ -11,3 +11,9 @@ optimiser state and map set are identical; it runs with fewer workers (48 x 12) 
 
 It is scored beside the main run at every check-in (tier 4 deaths, kills, exits) and replaces it only if it
 wins by more than noise; it is stopped if kills collapse or deaths turn into timeouts.
+
+- vec.reward.fist_cost 0.0 -> 0.003 (added 1:20 AM, copy restarted from its own latest checkpoint): the policy
+  put its gun away whenever no enemy was in view (fist selected on 21% of decisions) and took about 25
+  points of damage while drawing at the start of a fight. The term charges each decision spent on the melee
+  slot while bullets are held, and nothing when the agent is out of bullets and the engine itself has put the
+  fist up (training/tests/test_fist_cost.py). It is booked under the "ammo" reward term.

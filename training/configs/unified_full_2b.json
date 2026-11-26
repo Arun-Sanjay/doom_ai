@@ -31,7 +31,8 @@
     "teacher": "real",
     "reward": {
       "hit_bonus": 0.01,
-      "ammo_cost": 0.008
+      "ammo_cost": 0.008,
+      "fist_cost": 0.003
     }
   },
   "teach": {
