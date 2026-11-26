@@ -13,6 +13,22 @@ policy's own held-out exit rate rises. There is no rule tree, no path search and
 `submission/`; the only hand-written code that touches action choice is two action masks computed from
 observation fields (`submission/doomnet/spec.py`), and a lint test enforces this on every push.
 
+**Techniques used to train the shipped agent.** Every row is in the code path that produced the
+committed weights; the last column is where to read it.
+
+| Technique | What we did | Where |
+|---|---|---|
+| Recurrent PPO | Our own PPO, no SB3: GRU controller, truncated back-propagation through time over 16-step chunks, clipped policy and value losses, GAE | `training/rl/ppo.py`, `training/rl/buffer.py` |
+| Actor-critic | One network: six factored action heads and the manager's two heads (actor); two value heads (critic), one for the task reward and one for the curiosity reward | `submission/doomnet/model.py`, `training/rl/ppo.py` |
+| Reward shaping | Terms that mirror the evaluation categories (exit, efficiency, keys and doors, sectors explored, kills) plus small shaping terms: bonus per hit, cost per missed shot, damage, death and door-reversal penalties | `training/rl/reward.py` |
+| Curriculum learning | Combat arenas first; then all tiers with a fixed tier mix for 30 M steps; then adaptive sampling that favours the tier with the lowest recent exit rate | `training/rl/curriculum.py`, `training/configs/` |
+| Curiosity | **On. Count-based and map novelty, not RND.** Two episodic terms from the agent's own memory map: a bonus for each map cell observed for the first time, and 1/sqrt(n) on the n-th entry into a cell. Own value head, weight 0.3 on the advantage; it contributes about 3.7 of return per episode beside 8.6 of task return. We ran no ablation without it, so we claim no measured gain from it | `training/rl/intrinsic.py` |
+| Imitation, then PPO alone | An imitation term inside PPO, not a separate cloning stage. Combat: PPO alone from random weights. Navigation: the student drives the engine and a scripted teacher labels the states it reaches; the labels enter as a distillation loss beside the PPO loss. Its weight stepped down 0.25, 0.1, 0.03, 0 as the policy's held-out exit rate rose and reached 0 at 44 M steps of the last phase; the shipped weights come from a further 54 M steps of PPO alone | `training/rl/train.py`, `training/rl/ppo.py`, `training/teacher/` |
+| Action masking | Two masks from observation fields, identical in training and inference: USE only with a door ray within reach; ATTACK only with an enemy in view and a gun selected | `submission/doomnet/spec.py` |
+| Ego-centric occupancy grid | An 11-channel 64 x 64 grid centred on the agent (free, wall, door, locked door, visited, recency, enemy, item, key, exit, used), cut from a map the agent builds from its own actions and observations. Agent-centred, but kept in the start frame's orientation: it does not rotate with the heading | `submission/doomnet/memory.py`, `submission/doomnet/encode.py` |
+| Vectorised environments | 1,536 engine instances in 128 worker processes with batched policy inference on the GPU, about 10,000 environment steps per second | `training/rl/vecenv.py`, `training/rl/rollout.py` |
+| Procedural maps | Our own generator in the organizers' map format: layouts for every tier, randomised sizes, textures, starts, monsters and pickups, and a solver that proves each map can be finished. 4,500 maps in the last training phase; held-out suites frozen as grids | `training/mapgen/`, `training/suites/` |
+
 What is in this repository:
 
 - **The agent** (`submission/`): a three-level policy network (manager, value propagation,
