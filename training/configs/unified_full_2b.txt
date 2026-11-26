@@ -1,0 +1,13 @@
+unified_full_2b.json: a test copy of the second-phase run with two reward settings changed.
+
+Resumed from the same checkpoint as runs/unified_full_2 at the moment the copy was made, so schedules,
+optimiser state and map set are identical; it runs with fewer workers (48 x 12) beside the main run.
+
+- vec.reward.hit_bonus 0.05 -> 0.01: a replay analysis of tier 4 deaths showed the agent standing at
+  point-blank range trading pistol shots with a 400-500 health monster; the per-hit bonus paid more for
+  that than the kill and the death penalty together.
+- vec.reward.ammo_cost 0.002 -> 0.008: the agent held fire on 93-99% of the steps it could; held pistol
+  fire spreads, so missed shots now cost enough for tapping to pay.
+
+It is scored beside the main run at every check-in (tier 4 deaths, kills, exits) and replaces it only if it
+wins by more than noise; it is stopped if kills collapse or deaths turn into timeouts.
