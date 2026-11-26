@@ -286,6 +286,7 @@ def run_episode(wad, map_name, driver, seed, steps, with_map=False, record=None)
         errors.append(math.hypot(od.x - tx, od.y - ty))
         heading = max(heading, angle_error(od.theta, tth))
     env.close()
+    assert od.errors == 0, f"the odometry's measurement failed on {od.errors} steps: {od.last_error}"
     return np.array(errors), heading, mem, od
 
 
@@ -460,6 +461,7 @@ def test_odd_observations_never_raise_or_warn():
             f = enc.encode(obs, od.pose, a, step, 525, (0.9, 0.2, 0.1))
             assert np.isfinite(crop).all() and crop.min() >= 0.0 and crop.max() <= 1.0
             assert all(np.isfinite(v).all() for v in f.values())
+    assert od.errors == 0, od.last_error                     # nothing was caught: these inputs are handled, not survived
     od.reset(), mem.reset(), enc.reset()
     assert od.pose == (0.0, 0.0, 0.0) and not mem.crop(od.pose).any()
 
@@ -676,10 +678,314 @@ def test_odometry_reset():
         a = np.array([1, 0, 0, 0, 1, 0, 0, 0, 0], np.int8)
         obs, *_ = env.step(a)
         od.update(a, obs)
-    assert od.pose != (0.0, 0.0, 0.0) and od.step == 20
+    assert od.pose != (0.0, 0.0, 0.0) and od.step == 20 and od.errors == 0
+    od.update(a, None)                                        # counted, see the tests of the guard below
+    assert od.errors == 1 and od.last_error
     od.reset()
     assert od.pose == (0.0, 0.0, 0.0) and od.step == 0 and od.disturbed_steps == 0
+    assert od.errors == 0 and od.last_error == "" and od.last_mode == "free"
     env.close()
+
+
+def test_the_error_total_survives_reset(grid_maps):
+    """`errors` and `last_error` are per map; `errors_total` and `last_error_total` are for the life of the
+    object, so a log that reads them at any moment (after a reset, at the end of a run) sees every failure.
+    The reader below does what a per-episode training log does: it never looks before a reset, only at the
+    growth of the total, and still accounts for every failed step of three maps."""
+    tape = recorded_wall_run(grid_maps, 40)
+    od = Odometry()
+    assert (od.errors, od.errors_total, od.last_error, od.last_error_total) == (0, 0, "", "")
+    per_map, seen, fed = [], 0, 0
+    for failures in (2, 0, 3):
+        od.reset()
+        for i, (a, obs) in enumerate(tape):
+            od.update(a, None if i < failures else obs)
+            fed += i < failures
+            assert od.errors_total == fed and od.errors == min(i + 1, failures)
+        assert od.errors == failures and bool(od.last_error) == bool(failures)
+        od.reset()                                                       # the map changes before anybody reads
+        per_map.append(od.errors_total - seen)
+        seen = od.errors_total
+        assert od.errors == 0 and od.last_error == ""
+    assert per_map == [2, 0, 3] and od.errors_total == 5
+    assert od.last_error_total.startswith("step 3: TypeError at line ")  # the last failed step of the last failing map
+    assert Odometry().errors_total == 0                                  # nothing is shared between objects
+
+
+def test_failed_measurements_are_printed_at_the_first_tenth_and_hundredth(grid_maps, monkeypatch, capsys):
+    """A failure must be seen even where nobody reads the counters: the 1st, 10th, 100th, ... failed measurement
+    of the process is one line on stderr. Normal play prints nothing, a stderr that cannot be written and an
+    exception that cannot be described cost neither the step nor the count."""
+    import sys
+
+    from doomnet import odometry
+
+    tape = recorded_wall_run(grid_maps, 40)
+    monkeypatch.setattr(odometry.Odometry, "process_errors", 0)          # put back after the test
+    capsys.readouterr()
+    od, other = Odometry(), Odometry()
+    for a, obs in tape:
+        od.update(a, obs)
+    assert capsys.readouterr().err == "" and odometry.Odometry.process_errors == 0
+    for n in range(1, 13):                                               # the count is of the process: both objects feed it
+        (od if n % 2 else other).update(a, None)
+    lines = [line for line in capsys.readouterr().err.splitlines() if line.startswith("[doomnet] odometry: measurement failure")]
+    assert len(lines) == 2 and " failure 1 of this process, at step 41 " in lines[0] and " failure 10 of this process, at step 5 " in lines[1]
+    assert "TypeError at line " in lines[0] and "errors_total" in lines[0]
+    assert odometry.Odometry.process_errors == 12 and od.errors_total == other.errors_total == 6
+
+    class Closed:
+        def write(self, text):
+            raise OSError("stderr is closed")
+
+        def flush(self):
+            raise OSError("stderr is closed")
+
+    class Mute(Exception):
+        def __str__(self):
+            raise RuntimeError("no text")
+
+    class Unreadable:
+        def __getitem__(self, key):
+            raise Mute()
+
+    pose = od.pose
+    with monkeypatch.context() as patch:
+        patch.setattr(odometry.Odometry, "process_errors", 99)           # the next failure is one that is printed
+        patch.setattr(sys, "stderr", Closed())
+        od.update(a, None)
+        assert odometry.Odometry.process_errors == 100
+    assert od.errors_total == 7 and od.last_mode == "error" and od.last_error.startswith("TypeError at line ")
+    od.update(a, Unreadable())
+    assert od.errors_total == 8 and od.last_error == "Mute" and od.last_error_total == "step 48: Mute"
+    assert od.step == 48 and od.pose != pose and all(math.isfinite(v) for v in od.pose)
+
+
+# ---- the pose estimate cannot fail: wall-slide histories, the guard in update, long random runs ----
+def test_wall_slide_skips_histories_in_which_the_body_is_not_pressed():
+    """Contact at tic 0 with a fast approach, a tic that fits into the gap the engine leaves, then a tic that
+    presses again and is tried as the stop tic. With the contact share that the measured approach asks for
+    (below the fudge share) the gap is smaller, the middle tic presses instead, and the body is not pressed
+    at the stop tic: `_slide_run` answers None for that history. `_wall_slide` used to unpack that None."""
+    from doomnet import odometry
+
+    mn, mt, an, at = 10.0, 3.0, [0.0, 0.3, 0.0, 0.0], [0.2, 0.2, 0.2, 0.2]
+    base = odometry._slide_run(mn, mt, an, at, 0, odometry.SLIDE_FUDGE, 2)
+    assert base is not None and odometry._slide_run(mn, mt, an, at, 0, 0.0, 2) is None
+    for short in (0.05, 0.3, 1.0, 5.0):                                  # measured approach this much under the model's
+        along, cost, stopped = odometry._wall_slide(mn, mt, an, at, base[0] - short, 0.0, 0.5)
+        assert along is None or math.isfinite(along)
+        assert cost <= odometry.SLIDE_ACCEPT and (along is None) == (cost == odometry.SLIDE_ACCEPT)
+    # Random momenta, thrusts and measurements, far beyond what a step can hold: an answer or None, never an exception.
+    rng = np.random.default_rng(0)
+    for _ in range(4000):
+        scale = float(rng.choice([0.05, 0.5, 5.0, 50.0]))
+        mn, mt, dn_seen, on, ot = (rng.normal(0, scale, 5) * (rng.random(5) < 0.8)).tolist()
+        an, at = (rng.normal(0, 0.5, 4) * (rng.random(4) < 0.7)).tolist(), rng.normal(0, 0.5, 4).tolist()
+        along, cost, stopped = odometry._wall_slide(mn, mt, an, at, dn_seen, on, ot)
+        assert along is None or math.isfinite(along)
+
+
+def recorded_wall_run(grid_maps, steps=160):
+    """(action, observation) pairs of a run that rams and slides along the walls of the maze, first observation dropped."""
+    tape = []
+    run_episode(grid_maps["maze"], "MAP01", "random", 1, steps, record=tape)
+    return tape[1:]
+
+
+@pytest.mark.parametrize("fault", ["raise", "nan"])
+def test_a_failed_measurement_keeps_the_model_answer_and_is_counted(grid_maps, monkeypatch, fault):
+    """The guard in `Odometry.update`. One measured step of a recorded run is made to fail (the measurement
+    raises, or returns NaN): that step takes the model's answer for the reported momentum, exactly what a step
+    with no previous scan gets, the failure is counted and named, and the run carries on measuring."""
+    from doomnet import odometry
+
+    tape = recorded_wall_run(grid_maps)
+    ref, modes = Odometry(), []
+    for a, obs in tape:
+        ref.update(a, obs)
+        modes.append(ref.last_mode)
+    measured = [i for i, mode in enumerate(modes) if mode.startswith("rays")]
+    assert ref.errors == 0 and len(measured) > 20, "the run was meant to hit walls"
+    k = measured[len(measured) // 2]
+
+    def broken(self, *args):
+        if fault == "raise":
+            raise RuntimeError("made to fail")
+        return float("nan"), 0.0
+
+    od, twin, measured_later = Odometry(), Odometry(), 0
+    for i, (a, obs) in enumerate(tape):
+        if i == k:
+            twin._scan = None                                            # the twin measures nothing at step k
+            twin.update(a, obs)
+            measured_before = od.disturbed_steps
+            with monkeypatch.context() as patch:
+                patch.setattr(odometry.Odometry, "_measure", broken)
+                od.update(a, obs)
+            assert od.errors == 1 and od.last_mode == "error" and twin.last_mode == "model"
+            assert od.disturbed_steps == measured_before                 # the failed step does not count as measured
+            assert ("RuntimeError" if fault == "raise" else "FloatingPointError") in od.last_error
+            assert od.pose == twin.pose and od._scan is None
+            continue
+        od.update(a, obs)
+        twin.update(a, obs)
+        assert od.pose == twin.pose and od.last_mode == twin.last_mode
+        assert all(math.isfinite(v) for v in od.pose)
+        measured_later += i > k and od.last_mode.startswith("rays")
+    assert od.errors == 1 and twin.errors == 0 and od.step == ref.step and od.heading == ref.heading
+    assert od.errors_total == 1 and od.last_error_total == f"step {k + 1}: {od.last_error}" and twin.errors_total == 0
+    assert measured_later > 5                                            # the run went on measuring after the failure
+    assert math.hypot(od.x - ref.x, od.y - ref.y) < 8.0
+
+
+def test_observations_that_cannot_be_read_are_counted_not_raised(grid_maps):
+    """Missing keys, wrong lengths and wrong types. Every such step is counted and named, the heading still
+    follows the buttons, and the position takes the best answer that could still be read: the model's answer for
+    the reported momentum when the velocity was readable (what a step with no previous scan gets), the plain
+    prediction when it was not (what a step with a NaN velocity gets). The next good observation is used as before."""
+    tape = recorded_wall_run(grid_maps, 60)
+    a, good = tape[30]
+    vitals, rays = good["vitals"], good["rays"]
+    no_velocity = {"vitals": np.where(np.arange(len(vitals)) == 14, np.nan, vitals), "rays": rays}
+
+    def with_rays(**kw):
+        return {"vitals": vitals, "rays": {**rays, **kw}}
+
+    unreadable = [(None, False), ({}, False), ({"vitals": vitals[:5], "rays": rays}, False), ({"vitals": None, "rays": rays}, False),
+                  ({"vitals": ["x"] * 17, "rays": rays}, False), ({"vitals": vitals}, True), ({"vitals": vitals, "rays": None}, True),
+                  (with_rays(distance=np.ones(32, np.float32), hit_type=np.ones(32, np.int64)), True),
+                  (with_rays(distance=np.zeros(0, np.float32), hit_type=np.zeros(0, np.int64)), True),
+                  (with_rays(distance=np.ones((64, 1), np.float32)), True), (with_rays(hit_type=np.ones(63, np.int64)), True),
+                  (with_rays(hit_type=None), True), (with_rays(hit_type=np.array(["w"] * 64)), True),
+                  (with_rays(distance=["a"] * 64), True), (with_rays(distance=0.5), True)]
+    for bad, velocity_read in unreadable:
+        od, twin = Odometry(), Odometry()
+        for b, obs in tape[:30]:
+            od.update(b, obs)
+            twin.update(b, obs)
+        assert od.errors == 0 and od.pose == twin.pose
+        for n in (1, 2):
+            od.update(a, bad)
+            twin._scan = None
+            twin.update(a, good if velocity_read else no_velocity)
+            assert od.errors == n and od.last_mode == "error" and od.last_error, f"{bad!r:.80}"
+            assert od.pose == twin.pose and od.heading == twin.heading and od._scan is None, f"{bad!r:.80}"
+        for b, obs in tape[30:]:
+            od.update(b, obs)
+        assert od.errors == 2 and twin.errors == 0 and od.step == len(tape) + 2 and all(math.isfinite(v) for v in od.pose)
+
+
+def random_button_steps(maps, seeds, steps, drivers=("masher", "random", "hugger")):
+    """Random-button episodes on generated maps, with and without god mode, attacks unmasked on every other
+    episode: (decision steps, odometry errors, steps with a non-finite pose, episodes that ended in death)."""
+    total = caught = bad = deaths = 0
+    for k, (name, wad, _) in enumerate(maps):
+        env, _ = open_env(wad, "MAP01", steps)
+        for seed in seeds:
+            obs, _ = env.reset(seed=seed)
+            if (k + seed) % 2:
+                env._game.send_game_command("god")
+            od, drv = Odometry(), DRIVERS[drivers[(k + seed) % len(drivers)]](1000 * k + seed)
+            for _ in range(steps):
+                a = drv.act(obs).copy()
+                a = masked(a, obs) if (k + seed) % 4 < 2 else a
+                obs, _, term, trunc, _ = env.step(a)
+                if term or trunc:
+                    deaths += bool(term)
+                    break
+                od.update(a, obs)                                        # an exception here fails the test
+                total += 1
+                bad += not all(math.isfinite(v) for v in od.pose)
+            caught += od.errors_total
+            assert od.errors == 0 and od.errors_total == 0, f"{name} seed {seed}: {od.last_error_total}"
+        env.close()
+    return total, caught, bad, deaths
+
+
+def test_random_buttons_on_generated_maps_never_fail_the_measurement(tmp_path):
+    """Fast version of the measurement below: one generated map of each tier with monsters, 3 episodes each."""
+    maps = generated_maps(tmp_path, (1, 2, 3, 4), 1, lambda c: c["monsters"] >= 3)
+    total, caught, bad, _ = random_button_steps(maps, range(3), 200)
+    assert total > 1200 and caught == 0 and bad == 0
+
+
+@pytest.mark.slow
+def test_random_buttons_on_generated_maps_never_fail_the_measurement_over_many_steps(tmp_path):
+    """About 70,000 steps of random buttons on 40 generated maps of tiers 0 to 4 (monsters, doors, keys and
+    pickups), half of the episodes without god mode: no exception, no caught failure, a finite pose throughout."""
+    maps = generated_maps(tmp_path, (0, 1, 2, 3, 4), 8, lambda c: True)
+    total, caught, bad, deaths = random_button_steps(maps, range(4), 520)
+    print(f"\nrandom buttons on generated maps: {len(maps)} maps, {total} steps, {deaths} deaths, "
+          f"{caught} caught failures, {bad} steps with a non-finite pose")
+    assert total > 40000 and deaths > 10 and caught == 0 and bad == 0
+
+
+def perturbed_steps(tape, steps, seed=0, cls=None):
+    """Replays stretches of a recorded run with the observations disturbed: the reported velocity replaced or
+    nudged, all but a few rays blanked, the scan of another step swapped in, monsters and doors painted over
+    walls. These reach every fallback of the measurement with numbers no real step produces.
+    Returns (steps, exceptions raised, failures caught by the guard, steps with a non-finite pose)."""
+    rng, cls = np.random.default_rng(seed), cls or Odometry
+    done = raised = caught = bad = 0
+    while done < steps:
+        od, kind = cls(), int(rng.integers(5))
+        start = int(rng.integers(len(tape) - 60))
+        for a, obs in tape[start:start + int(rng.integers(5, 60))]:
+            d, h, v = (np.array(x) for x in (obs["rays"]["distance"], obs["rays"]["hit_type"], obs["vitals"]))
+            p = rng.random()
+            if kind == 0 or p < 0.2:                                     # the reported velocity replaced
+                v[14:16] = rng.normal(0, rng.choice([0.05, 1.0, 8.0, 40.0]), 2)
+            if kind == 1:                                                # ... or nudged
+                v[14:16] += rng.normal(0, rng.choice([0.03, 0.2, 1.0]), 2)
+            if kind == 2 or 0.2 <= p < 0.3:                              # few rays left
+                blank = np.ones(64, bool)
+                blank[rng.choice(64, size=int(rng.choice([0, 1, 2, 3, 4, 6, 10])), replace=False)] = False
+                h[blank], d[blank] = spec.HIT_NONE, 1.0
+            if kind == 3 and rng.random() < 0.3:                         # the view of another place
+                other = tape[int(rng.integers(len(tape)))][1]["rays"]
+                d, h = np.array(other["distance"]), np.array(other["hit_type"])
+            if kind == 4 and rng.random() < 0.5:                         # something painted over the walls
+                idx = (int(rng.integers(64)) + np.arange(int(rng.integers(1, 12)))) % 64
+                h[idx] = rng.choice([spec.HIT_ENEMY, spec.HIT_DOOR, spec.HIT_LOCKED, spec.HIT_ITEM])
+                d[idx] *= rng.random()
+            try:
+                od.update(a, {"vitals": v, "rays": {"distance": d, "hit_type": h}})
+            except Exception:  # noqa: BLE001 - counted: the caller asserts on it
+                raised += 1
+                break
+            done += 1
+            bad += not all(math.isfinite(x) for x in od.pose)
+        caught += getattr(od, "errors", 0)
+    return done, raised, caught, bad
+
+
+def test_disturbed_observations_never_fail_the_measurement(grid_maps):
+    """Fast version of the measurement below: 6,000 disturbed steps, numpy warnings raised as errors."""
+    import warnings
+
+    tape = recorded_wall_run(grid_maps, 300)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        done, raised, caught, bad = perturbed_steps(tape, 6000)
+    assert done >= 6000 and raised == 0 and caught == 0 and bad == 0
+
+
+@pytest.mark.slow
+def test_disturbed_observations_never_fail_the_measurement_over_many_steps(grid_maps, tmp_path):
+    """200,000 disturbed steps over recorded runs on the grid maps and on generated maps with monsters."""
+    import warnings
+
+    tapes = [recorded_wall_run(grid_maps, 600)]
+    for name, wad, _ in generated_maps(tmp_path, (2, 4), 2, lambda c: c["monsters"] >= 3):
+        tape = []
+        run_episode(wad, "MAP01", "random", 0, 600, record=tape)
+        tapes.append(tape[1:])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        totals = np.sum([perturbed_steps(tape, 40000, seed) for seed, tape in enumerate(tapes)], axis=0)
+    print(f"\ndisturbed observations: {totals[0]} steps, {totals[1]} exceptions, {totals[2]} caught failures, {totals[3]} non-finite poses")
+    assert totals[0] >= 200000 and not totals[1:].any()
 
 
 # ---------------------------------------------------------------------------------------------

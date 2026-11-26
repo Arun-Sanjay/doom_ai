@@ -144,10 +144,13 @@ def test_add_distractors_gives_a_grid_that_compiles():
 # ---- planning ------------------------------------------------------------------------------------------
 def test_plan_is_deterministic_and_sets_share_no_layout():
     sizes = {"unseen": 20, "heldout": 20, "val": 20, "train": 40, "calib": 20, "weapons": 20, "extra": 20,
-             "play_heldout": 20, "play_calib": 20, "play": 20, "play2": 20}
+             "play_heldout": 20, "play_calib": 20, "play": 20, "play2": 20, "heldout2": 20, "unseen2": 20,
+             "padflats": 20, "fight": 20}
     plans = C.plan(sizes)
     assert plans == C.plan(sizes)
     assert {k: len(v) for k, v in plans.items()} == sizes
+    assert list(plans)[:11] == ["unseen", "heldout", "val", "train", "calib", "weapons", "extra", "play_heldout", "play_calib",
+                                "play", "play2"], "a new set must be planned after the ones already collected"
     frozen, seen = frozen_grids(), {}
     for name, jobs in plans.items():
         lo = C.SETS[name]["seed"]
@@ -157,13 +160,24 @@ def test_plan_is_deterministic_and_sets_share_no_layout():
             seen[j["base_grid_sha1"]] = name
             assert lo <= j["seed"] < lo + 250_000 and j["seed"] < 8_000_000
             used = X.option_textures(j["options"])
-            if name == "unseen":
+            if C.SETS[name]["side"] == "heldout":
                 assert j["look"] == "random"
                 assert set(used["floors"]) | {used["ceiling"]} <= set(X.HELD_FLATS) and set(used["walls"]) <= set(X.HELD_WALLS)
             else:
                 assert set(used["floors"]) | {used["ceiling"]} <= set(X.TRAIN_FLATS) and set(used["walls"]) <= set(X.TRAIN_WALLS)
-        assert {j["tier"] for j in jobs} == {0, 1, 2, 3, 4}
+        assert {j["tier"] for j in jobs} == set(C.SETS[name].get("tier_share") or {0, 1, 2, 3, 4})
+        if name not in ("padflats", "fight"):
+            assert all("exit_floor" not in j["options"] for j in jobs)         # the pad keeps its own flat
     assert any(j["look"] == "reference" for j in plans["train"]) and any(j["edits"] for j in plans["train"])
+    # the pad-flat set: every flat in turn, the pad's own flat among them as the control
+    assert [j["options"]["exit_floor"] for j in plans["padflats"]] == [C.PAD_FLATS[i % len(C.PAD_FLATS)] for i in range(20)]
+    assert C.PAD_FLATS[0] == udmf.EXIT_FLOOR and len(set(C.PAD_FLATS)) == len(C.PAD_FLATS)
+    # the fight set: maps with monsters; a small share draws the pad with a flat that looks almost like it
+    full = C.plan({**sizes, "fight": 200})["fight"]
+    other = [j["options"]["exit_floor"] for j in full if "exit_floor" in j["options"]]
+    assert set(other) <= set(C.NEAR_PAD_FLATS) and 10 <= len(other) <= 60
+    assert all(j["recipe"] == "fight" and j["tier"] in (1, 3, 4) for j in full)
+    assert C.ROLES["fight"].startswith("training") and all(C.ROLES[k].startswith("evaluation") for k in ("heldout2", "unseen2", "padflats"))
     # growing the training set changes none of the sets planned before it
     bigger = C.plan({**sizes, "train": 60})
     assert all(bigger[k] == plans[k] for k in ("unseen", "heldout", "val")) and bigger["train"][:5] == plans["train"][:5]
@@ -255,6 +269,116 @@ def test_a_pad_hidden_behind_a_monster_or_a_corpse_is_no_target():
     m = E.detection_metrics(f, logit, np.zeros((6, 2), np.float32))
     assert m["recall_0_200"] == 0.0 and m["n_drawn_0_200"] == 1 and m["n_clear_0_200"] == 0     # a miss by the label, not a clear view
     assert m["recall_clear_200_400"] == 1.0 and m["recall_clear_0_400"] == 1.0 and m["recall_0_400"] == 0.5
+    assert m["n_covered_0_400"] == 1 and m["recall_covered_0_400"] == 0.0 and m["cover_recorded"] == 1.0
+    # a set collected before the cover was recorded says nothing about a clear view
+    f["cover_known"] = np.zeros(6, bool)
+    old = E.detection_metrics(f, logit, np.zeros((6, 2), np.float32))
+    assert old["n_clear_0_400"] == 0 and math.isnan(old["recall_clear_0_400"]) and old["cover_recorded"] == 0.0
+    assert old["n_covered_0_400"] == 0 and old["gate_recall_clear_0_400"] == "not judged" and old["recall_0_400"] == 0.5
+    assert D.clear(f).tolist() == [False, True, False, False, False, False]         # the training target does not change
+
+
+def big_set(maps: int = 40, per_map: int = 10, covered_share: float = 0.3, seed: int = 0) -> tuple[dict, np.ndarray]:
+    """Visible drawn pads at 200 units on tier 1 and tier 2 maps; on tier 1 a monster is in view and
+    hides the pad in part of the frames. The detector finds every pad in clear view and no hidden one."""
+    rng = np.random.default_rng(seed)
+    n = maps * per_map
+    f = D.empty_fields(n)
+    f["visible"][:] = True
+    f["pos"][:] = (200.0, 0.0)
+    f["pad_px"][:] = 100
+    f["map_id"][:] = np.repeat(np.arange(maps), per_map)
+    tier = np.where(np.arange(maps) % 2 == 0, 1, 2)
+    fight = tier[f["map_id"]] == 1
+    f["tags"][fight] = D.TAG_BIT["monster"]
+    hidden = fight & (rng.random(n) < covered_share)
+    f["pad_cover"][hidden] = 90
+    f["tags"][hidden & (rng.random(n) < 0.5)] |= D.TAG_BIT["hurt"]
+    f["maps"] = [{"name": f"m{i}", "tier": int(t), "look": "reference", "options": {}} for i, t in enumerate(tier)]
+    return f, np.where(hidden, -6.0, 6.0)
+
+
+def test_table_rows_split_by_tier_monster_and_tint_and_judge_recall_twice():
+    f, logit = big_set()
+    picks = E.subsets(f)
+    assert list(picks)[0] == "all" and set(picks) == {"all", "reference look", "tier 1", "tier 2", "monster in view",
+                                                      "no monster in view", "damage tint", "no damage tint"}
+    assert picks["tier 1"].sum() == 200 and np.array_equal(picks["monster in view"], picks["tier 1"])
+    pos = np.tile([200.0, 0.0], (len(logit), 1)).astype(np.float32)
+    rows = {name: {"set": "toy", "subset": name, **E.detection_metrics(f, logit, pos, sel)} for name, sel in picks.items()}
+    whole, fight, calm = rows["all"], rows["monster in view"], rows["no monster in view"]
+    # pooled, the label's recall passes; the monster rows show what it hides
+    assert whole["recall_0_400"] >= 0.80 and calm["recall_0_400"] == 1.0 and calm["gate_recall_0_400"] == "pass"
+    assert fight["recall_0_400"] < 0.80 and fight["gate_recall_0_400"] == "FAIL"
+    assert fight["recall_clear_0_400"] == 1.0 and fight["gate_recall_clear_0_400"] == "pass"
+    assert fight["recall_covered_0_400"] == 0.0 and fight["n_covered_0_400"] + fight["n_clear_0_400"] == fight["n_0_400"] == 200
+    assert rows["tier 1"]["gate_recall_0_400"] == "FAIL" and rows["tier 2"]["gate_recall_0_400"] == "pass"
+    assert rows["damage tint"]["n_0_400"] < E.MIN_GATE_FRAMES and rows["damage tint"]["gate_recall_0_400"] == "not judged"
+    # the interval comes from resampling maps and contains the estimate
+    assert fight["recall_0_400_lo95"] < fight["recall_0_400"] < fight["recall_0_400_hi95"]
+    assert calm["recall_0_400_lo95"] == calm["recall_0_400_hi95"] == 1.0
+    gate = E.gate(list(rows.values()), {"latency_mean_ms": 0.6})
+    assert gate["toy/monster in view"]["recall within 400 >= 0.90"] is False
+    assert gate["toy/monster in view"]["recall within 400, pad in clear view >= 0.90"] is True
+    assert gate["toy/damage tint"]["recall within 400 >= 0.90"] is None                  # too few frames to judge
+    assert gate["toy/all"]["precision >= 0.98"] is True and gate["toy/all"]["latency <= 1.5 ms"] is True
+    json.dumps(gate)
+    lines = E.summary_lines(list(rows.values()), {"latency_mean_ms": 0.6, "latency_p50_ms": 0.5, "latency_p95_ms": 0.9, "latency_max_ms": 2.0})
+    assert "clear view 1.000" in lines[list(rows).index("monster in view")] and "FAIL" in lines[list(rows).index("monster in view")]
+
+
+def test_compare_tables_puts_two_detectors_side_by_side_on_the_same_rows(tmp_path):
+    f, logit = big_set()
+    pos = np.tile([200.0, 0.0], (len(logit), 1)).astype(np.float32)
+    for tag, shift in (("a", 0.0), ("b", -20.0)):               # b fires on nothing
+        rows = [{"set": "toy", "subset": name, **E.detection_metrics(f, logit + shift, pos, sel)} for name, sel in E.subsets(f).items()]
+        E.write_csv(rows[:-1] if tag == "b" else rows, tmp_path / f"{tag}.csv", {"weights_sha256": tag * 12})
+    out = E.compare_tables({"first": tmp_path / "a.csv", "second": tmp_path / "b.csv"})
+    assert [(r["subset"], r["detector"]) for r in out[:4]] == [("all", "first"), ("all", "second"), ("tier 1", "first"), ("tier 1", "second")]
+    assert not any(r["subset"] == "no damage tint" for r in out)          # the row one table lacks is left out of both
+    assert float(out[0]["recall_0_400"]) > 0.8 and float(out[1]["recall_0_400"]) == 0.0 and out[1]["weights_sha256"] == "b" * 12
+    assert E.main(["--compare", f"x={tmp_path / 'a.csv'}", f"y={tmp_path / 'b.csv'}", "--sets", "toy", "--csv", str(tmp_path / "c.csv")]) == 0
+    with (tmp_path / "c.csv").open() as fh:
+        assert len(list(csv.DictReader(fh))) == len(out)
+
+
+def test_initial_state_takes_the_threshold_out_of_the_bias_again(tmp_path):
+    torch.manual_seed(0)
+    det = ExitDetector()
+    raw = float(det.fc2.bias.detach()[0])
+    state = {k: v.clone() for k, v in det.state_dict().items()}
+    state["fc2.bias"][0] -= 2.5                                  # what train() saves: the bias minus the threshold logit
+    torch.save({"state_dict": state, "config": {"bias_shift_logit": -2.5}}, str(tmp_path / "w.pt"))
+    back, config = T.initial_state(tmp_path / "w.pt")
+    assert float(back["fc2.bias"][0]) == pytest.approx(raw, abs=1e-6) and config["bias_shift_logit"] == -2.5
+    assert all(torch.equal(back[k], v) for k, v in det.state_dict().items() if k != "fc2.bias")
+    torch.save(det.state_dict(), str(tmp_path / "bare.pt"))      # a bare state dict has no threshold folded in
+    assert float(T.initial_state(tmp_path / "bare.pt")[0]["fc2.bias"][0]) == pytest.approx(raw, abs=1e-6)
+
+
+def test_map_interval_is_wider_than_a_frame_interval_when_misses_sit_in_few_maps():
+    maps, per_map = 30, 20
+    map_id = np.repeat(np.arange(maps), per_map)
+    group = np.ones(maps * per_map, bool)
+    fired = map_id >= 3                                        # every miss is in three maps: recall 0.9
+    lo, hi = E.map_interval(fired, group, map_id)
+    assert lo < 0.9 < hi and hi - lo > 0.15                    # frames resampled alone would give about +-0.024
+    assert E.map_interval(fired, group, map_id) == (lo, hi)    # seeded
+    assert all(math.isnan(v) for v in E.map_interval(fired, np.zeros_like(group), map_id))
+    assert E.verdict(0.95, 500) == "pass" and E.verdict(0.899, 500) == "FAIL"
+    assert E.verdict(0.5, E.MIN_GATE_FRAMES - 1) == "not judged" and E.verdict(float("nan"), 500) == "not judged"
+
+
+def test_subsets_name_the_pad_flat_of_a_map():
+    f = D.empty_fields(6)
+    f["map_id"][:] = [0, 0, 1, 1, 2, 2]
+    f["maps"] = [{"tier": 0, "options": {"exit_floor": "GATE1"}}, {"tier": 0, "options": {"exit_floor": "FLAT14"}},
+                 {"tier": 0, "options": {}}]
+    picks = E.subsets(f)
+    assert picks["pad flat GATE1"].tolist() == [True, True, False, False, False, False]
+    assert picks["pad flat FLAT14"].sum() == 2 and not any("GATE3" in k for k in picks) and picks["tier 0"].all()
+    f["maps"][2]["options"] = {"exit_floor": "GATE3"}          # every map names its flat: the whole and the flats, nothing else
+    assert list(E.subsets(f)) == ["all", "pad flat FLAT14", "pad flat GATE1", "pad flat GATE3"]
 
 
 def test_pad_cover_sees_a_monster_and_its_corpse_in_front_of_the_pad(tmp_path):
@@ -450,6 +574,8 @@ def test_load_set_fills_fields_an_older_shard_does_not_have(tmp_path):
     assert set(D.FIELDS) <= set(back) and all(back[k].dtype == dt for k, dt in D.FIELDS.items())
     assert np.array_equal(back["pad_ego"], f["pos"]) and back["pad_los"].tolist() == [True, False, False, True]
     assert (back["weapon"] == 0).all() and (back["pad_cover"] == 0).all()
+    assert not back["cover_known"].any() and not D.cover_known(back).any()         # nothing is known about a monster on the pad
+    assert D.cover_known(f).all()                                                  # data not loaded from shards: taken as recorded
     t = T.targets(back)
     assert t["y"].tolist() == [1, 0, 0, 1] and t["valid"].tolist() == [1, 0, 1, 1] and t["pos_w"].tolist() == [1, 0, 0, 1]
 
@@ -467,7 +593,7 @@ def test_load_train_joins_sets_and_keeps_map_ids_apart(tmp_path):
     both = T.load_train(tmp_path, ["a", "b"], top=48)
     assert both["rgb"].shape == (10, 72, 160, 3) and both["rgb"][:5].max() == 7 and both["rgb"][5:].min() == 9
     assert both["map_id"].tolist() == [0, 1, 0, 1, 0, 2, 3, 4, 2, 3] and [m["name"] for m in both["maps"]] == ["a0", "a1", "b0", "b1", "b2"]
-    assert D.describe(both)["maps"] == 5
+    assert D.describe(both)["maps"] == 5 and both["cover_known"].all() and len(both["cover_known"]) == 10
     picks = E.subsets(both)
     assert set(picks) == {"all", "random look", "holding pistol", "holding shotgun"} and picks["holding shotgun"].sum() == 5
     assert len(T.load_train(tmp_path, ["a"], top=48)["visible"]) == 5
@@ -560,6 +686,22 @@ def test_play_recipe_plays_from_the_start_and_sees_what_a_fight_leaves(tmp_path)
     assert D.has_tag(f["tags"], "blood").sum() >= 5            # corpses and blood: the engine files both under gore
     assert D.has_tag(f["tags"], "monster").any() and D.has_tag(f["tags"], "firing").any()
     assert not (f["visible"] & f["ambiguous"]).any()
+
+
+def test_fight_recipe_looks_at_the_pad_while_monsters_close_in(tmp_path):
+    """The `fight` recipe: long looks at the pad with the monsters awake; the cover is recorded; the pad flat can differ."""
+    spec = {**job(ARENA, tmp_path, name="fight", frames=64, seed=3, options={"exit_floor": "GATE1"}), "recipe": "fight"}
+    result = C.collect_map(spec)
+    assert result["error"] == "", result["error"]
+    f = result["fields"]
+    kinds = np.bincount(f["kind"], minlength=len(D.KINDS))
+    assert kinds.sum() == 64 and kinds[D.KIND_INDEX["exit_view"]] >= 30
+    assert kinds[D.KIND_INDEX["approach"]] == 0 and kinds[D.KIND_INDEX["spin"]] == 0 and kinds[D.KIND_INDEX["play"]] == 0
+    vis = f["visible"]
+    assert vis.sum() >= 20 and D.has_tag(f["tags"], "monster")[vis].any()
+    assert D.drawn(f)[vis].mean() > 0.5                         # GATE1 is as red as the pad's own flat
+    assert (f["pad_cover"][~vis & (f["pad_dist"] < 0)] == 0).all() and f["pad_cover"].max() <= 100
+    assert D.has_tag(f["tags"], "hurt").any() or D.has_tag(f["tags"], "firing").any()
 
 
 def test_hunt_turns_on_a_monster_and_fires_when_it_is_ahead():
@@ -690,8 +832,77 @@ def test_collect_set_writes_a_loadable_set(tmp_path):
     assert logit.shape == (summary["frames"],) and pos.shape == (summary["frames"], 2)
     rows = E.evaluate_sets(ExitDetector(), tmp_path, ["unseen"])
     names = [r["subset"] for r in rows]
-    assert names[:2] == ["all", "random look"] and all(n.startswith("holding ") for n in names[2:]) and len(names) >= 3
-    assert rows[0]["frames"] == summary["frames"] == sum(r["frames"] for r in rows[2:])
+    assert names[:2] == ["all", "random look"] and len(names) >= 4
+    allowed = ("holding ", "tier ", "monster in view", "no monster in view", "damage tint", "no damage tint")
+    assert all(n.startswith(allowed) for n in names[2:]), names
+    for prefix in ("holding ", "tier "):                       # each split covers every frame once
+        assert rows[0]["frames"] == summary["frames"] == sum(r["frames"] for r in rows if r["subset"].startswith(prefix))
+    assert {f"tier {j['tier']}" for j in jobs} <= set(names)
+    assert all(r["cover_recorded"] == 1.0 and r["gate_recall_0_400"] in ("pass", "FAIL", "not judged") for r in rows)
+    table = E.write_csv(rows, tmp_path / "table.csv", {"weights_sha256": "none"})
+    with table.open() as fh:
+        back = list(csv.DictReader(fh))
+    assert [r["subset"] for r in back] == names and {"gate_recall_clear_0_400", "recall_0_400_lo95", "n_covered_0_400"} <= set(back[0])
+
+
+# ---- navigation with and without the detector ----------------------------------------------------------
+def test_fallback_sensor_is_silent_without_a_frame_and_reports_like_the_agent():
+    from training.exitdet import fallback as F
+
+    assert F.teacher_with("label").sensor.source == "label"
+    silent = F.teacher_with("none")
+    assert silent.sensor.source == "none" and silent.sensor.read() is None
+    if not have_weights():
+        return
+    policy = F.teacher_with("detector")
+    sensor = policy.sensor
+    assert isinstance(sensor, F.DetectorSensor) and sensor.read() is None            # no frame yet
+    sensor.frame = np.zeros((120, 160, 3), np.uint8)
+    seen = sensor.read()
+    assert seen.shape == (3,) and seen.dtype == np.float32 and 0.0 <= seen[0] < 0.5 and sensor.sightings == 0   # a black frame: no pad
+
+
+@needs_weights
+@pytest.mark.slow
+def test_fallback_table_compares_label_detector_and_silence(tmp_path):
+    """One small hall: the teacher reaches the pad with a perfect label, with the detector, and by sweeping."""
+    from training.exitdet import fallback as F
+
+    suite = tmp_path / "tiny.jsonl"
+    suite.write_text(json.dumps({"name": "hall", "tier": 2, "grid": HALL, "episode_ticks": 2100, "options": {}}) + "\n")
+    old = F.MAPS_DIR
+    F.MAPS_DIR = tmp_path / "maps"
+    try:
+        rows = F.run(suite, tiers=(2,), budgets=("cap",), workers=0, log=lambda *a: None)
+    finally:
+        F.MAPS_DIR = old
+    by = {(r["exit_source"], str(r["tier"])): r for r in rows}
+    assert set(by) == {(s, t) for s in F.SOURCES for t in ("2", "all")}
+    assert all(r["episodes"] == 1 and r["agent_errors"] == 0 for r in rows)
+    assert by[("label", "all")]["exit_rate"] == 1.0 and by[("detector", "all")]["exit_rate"] == 1.0
+    assert by[("none", "all")]["exit_rate"] == 1.0                                 # found by sweeping: walking onto the pad ends the map
+    assert by[("none", "all")]["steps_to_exit"] >= by[("label", "all")]["steps_to_exit"]
+    assert by[("detector", "all")]["weights_sha256"] == E.file_sha256(WEIGHTS)[:12] and by[("label", "all")]["weights_sha256"] == ""
+    table = F.write_csv(rows, tmp_path / "fallback.csv")
+    with table.open() as fh:
+        assert [r["exit_source"] for r in csv.DictReader(fh)] == [s for s in F.SOURCES for _ in range(2)]
+
+
+@needs_weights
+@pytest.mark.skipif(not (LOG_CSV.parent / "exit_detector_fallback.csv").is_file(), reason="no navigation table yet")
+def test_logged_navigation_table_belongs_to_the_weights_and_orders_the_sources():
+    """With a perfect label, with the detector, with nothing: the detector must be worth most of the label."""
+    with (LOG_CSV.parent / "exit_detector_fallback.csv").open() as f:
+        rows = [r for r in csv.DictReader(f) if r["tier"] == "all"]
+    assert {r["exit_source"] for r in rows} == {"label", "detector", "none"}
+    for budget in {r["budget"] for r in rows}:
+        rate = {r["exit_source"]: float(r["exit_rate"]) for r in rows if r["budget"] == budget}
+        assert rate["label"] >= rate["detector"] - 0.02 and rate["detector"] > rate["none"], (budget, rate)
+        assert rate["detector"] >= rate["label"] - 0.05, (budget, rate)        # the detector costs at most five points of exit rate
+        assert rate["none"] >= 0.5, (budget, rate)                             # the sweep still finds most pads with the detector silent
+    for r in rows:
+        if r["exit_source"] == "detector":
+            assert r["weights_sha256"] == E.file_sha256(WEIGHTS)[:12], "the navigation table was made with other weights"
 
 
 # ---- the trained weights -------------------------------------------------------------------------------
@@ -751,11 +962,32 @@ def test_trained_detector_is_fast_enough_on_one_thread():
 def test_logged_table_belongs_to_the_weights_and_meets_the_gate():
     with LOG_CSV.open() as f:
         rows = list(csv.DictReader(f))
-    assert {(r["set"], r["subset"]) for r in rows} >= {("heldout", "all"), ("heldout", "reference look"), ("unseen", "all")}
+    have = {(r["set"], r["subset"]) for r in rows}
+    assert have >= {("heldout", "all"), ("heldout", "reference look"), ("unseen", "all")}
+    # the pooled figure cannot hide the hard cases: every evaluation set is split by tier and by monster in view
+    for name in ("heldout", "unseen", "heldout2", "unseen2"):
+        assert have >= {(name, "all"), (name, "tier 1"), (name, "tier 4"), (name, "monster in view"),
+                        (name, "no monster in view"), (name, "damage tint")}, name
     for r in rows:
         assert r["weights_sha256"] == E.file_sha256(WEIGHTS)[:12], "the table was made with other weights"
-        if r["set"] in ("heldout", "unseen"):
+        n, recall = int(r["n_0_400"]), float(r["recall_0_400"])
+        assert r["gate_recall_0_400"] == E.verdict(recall, n), (r["set"], r["subset"])           # the verdict is the number's
+        assert r["gate_recall_clear_0_400"] == E.verdict(float(r["recall_clear_0_400"]), int(r["n_clear_0_400"]))
+        if not math.isnan(recall) and n:
+            assert float(r["recall_0_400_lo95"]) <= recall + 1e-4 and recall <= float(r["recall_0_400_hi95"]) + 1e-4
+        if r["set"] in ("heldout", "unseen", "heldout2", "unseen2") and r["subset"] == "all":
             assert float(r["precision"]) >= 0.98, r["set"]
-            assert float(r["recall_0_400"]) >= 0.90, r["set"]
+            assert recall >= 0.90 and r["gate_recall_0_400"] == "pass", r["set"]                # the gate as written, pooled
             assert float(r["pos_err_median_0_400"]) <= 32.0, r["set"]
             assert float(r["latency_mean_ms"]) <= 1.5
+        if r["set"] in ("heldout2", "unseen2"):                # the sets that record how much of the pad a sprite hides
+            assert float(r["cover_recorded"]) == 1.0
+            if r["subset"] in ("all", "monster in view", "no monster in view") or r["subset"].startswith("tier "):
+                # with a monster in play the label's recall drops because the pad is hidden; in clear view it must hold
+                assert r["gate_recall_clear_0_400"] in ("pass", "not judged"), (r["set"], r["subset"], r["recall_clear_0_400"])
+        elif r["set"] in ("heldout", "unseen"):
+            assert float(r["cover_recorded"]) == 0.0 and r["gate_recall_clear_0_400"] == "not judged"
+    by = {(r["set"], r["subset"]): r for r in rows}
+    for name in ("heldout2", "unseen2"):
+        assert by[(name, "monster in view")]["gate_recall_clear_0_400"] == "pass"
+        assert float(by[(name, "monster in view")]["recall_covered_0_400"]) < float(by[(name, "monster in view")]["recall_clear_0_400"])

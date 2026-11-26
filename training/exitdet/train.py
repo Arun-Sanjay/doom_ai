@@ -28,11 +28,20 @@ frames from whole stretches of play) is found and folded into the bias of the
 visibility output, so that "sigmoid(logit) >= 0.5" is that operating point and nothing downstream
 needs to know a threshold.
 
+Continuing. `--init WEIGHTS` starts from an earlier detector instead of random weights (the
+threshold folded into its bias is taken out again first), for a short run at a lower learning rate
+after training sets were added; the threshold is then chosen anew. `--damage-flash` changes the
+share of frames that get the simulated damage tint. Both were used once, for the run recorded in
+training/logs/exit_detector_tint_experiment.csv: eight more epochs with the `fight` set added and
+twice the tint share changed neither the recall under the damage tint nor anything else by more
+than the spread between map samples, so the published weights are the ones trained before it.
+
 Outputs. runs/exitdet/TAG/: exit_detector.pt ({"state_dict", "config"}), train.csv (one row per
 epoch), table.csv and report.json (held-out evaluation), robustness.csv (the held-out set again
 under fixed colour changes, blur and noise). With --save the weights are also written to
 submission/weights/exit_detector.pt and the tables to training/logs/exit_detector*; a whole-episode
-table written into the run directory by `python -m training.exitdet.episodes --csv` goes with them.
+table written into the run directory by `python -m training.exitdet.episodes --csv` and a
+navigation table written by `python -m training.exitdet.fallback --csv` go with them.
 """
 
 from __future__ import annotations
@@ -204,9 +213,24 @@ def load_train(data_dir, names, top: int, max_frames: int | None = None) -> dict
     return out
 
 
+def initial_state(path) -> tuple[dict, dict]:
+    """State dict of saved weights with the decision threshold taken out of the bias again, and their config.
+
+    The saved visibility bias is the trained one minus the threshold logit (config "bias_shift_logit"),
+    so that 0 is the decision point. Training continues from the unshifted bias.
+    """
+    blob = torch.load(str(path), map_location="cpu", weights_only=True)
+    state = {k: v.clone() for k, v in (blob["state_dict"] if "state_dict" in blob else blob).items()}
+    config = blob.get("config", {}) if "state_dict" in blob else {}
+    state["fc2.bias"][0] -= float(config.get("bias_shift_logit", 0.0))
+    return state, config
+
+
 def train(cfg: TrainConfig, data_dir, out_dir, device: str = "auto", max_train_frames: int | None = None,
-          aug: AugmentConfig | None = None, log=print, train_sets=("train",), calib_sets=("calib",)) -> dict:
-    """Train, calibrate and save. Returns {"weights": path, "config": dict, "history": rows}."""
+          aug: AugmentConfig | None = None, log=print, train_sets=("train",), calib_sets=("calib",), init=None) -> dict:
+    """Train, calibrate and save. Returns {"weights": path, "config": dict, "history": rows}.
+
+    `init`: weights of an earlier detector to continue from (see `initial_state`); random weights otherwise."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     device = pick_device(device)
@@ -227,7 +251,13 @@ def train(cfg: TrainConfig, data_dir, out_dir, device: str = "auto", max_train_f
     tgt = {k: torch.from_numpy(v) for k, v in targets(train_set).items()}
     n = len(rgb)
 
-    model = ExitDetector().to(device)
+    model = ExitDetector()
+    init_sha = ""
+    if init:
+        model.load_state_dict(initial_state(init)[0])
+        init_sha = ev.file_sha256(init)[:12]
+        log(f"continuing from {init} (sha256 {init_sha})")
+    model = model.to(device)
     check_forward(model)
     decay = [p for name, p in model.named_parameters() if p.ndim > 1]
     no_decay = [p for name, p in model.named_parameters() if p.ndim <= 1]
@@ -304,6 +334,7 @@ def train(cfg: TrainConfig, data_dir, out_dir, device: str = "auto", max_train_f
               "threshold_frames": int(len(logit)),
               "val_precision_at_threshold": pick["precision"], "val_recall_0_400_at_threshold": pick["recall_0_400"],
               "train_frames": int(n), "train_maps": stats["maps"], "train_sets": list(train_sets), "label_max_range": 640.0,
+              "continued_from_sha256": init_sha,
               "parameters": int(sum(p.numel() for p in model.parameters())),
               "train": asdict(cfg), "augment": {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(aug).items()},
               "learner_device": device, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -327,8 +358,12 @@ def report(weights, data_dir, out_dir, device: str = "auto", sets=("val", "heldo
     if again:
         ev.write_csv([row for name in again for row in ev.robustness(model, data_dir, name, pick_device(device))],
                      out_dir / "robustness.csv", {"stamp": extra["stamp"], "weights_sha256": extra["weights_sha256"]})
-    result = {"weights": str(weights), "weights_sha256": ev.file_sha256(weights), "config": config, "latency": lat,
-              "gate": ev.gate([r for r in rows if r["set"] != "val"], lat), "rows": rows}
+    # report.json: the config, the latency, the gate verdict of every row, and the whole-set rows in
+    # full; every other row (tiers, monster in view, damage tint, weapons, pad flats) is in table.csv.
+    result = {"weights": str(Path(weights).resolve().relative_to(paths.ROOT)) if Path(weights).resolve().is_relative_to(paths.ROOT)
+              else str(weights),
+              "weights_sha256": ev.file_sha256(weights), "config": config, "latency": lat,
+              "gate": ev.gate([r for r in rows if r["set"] != "val"], lat), "rows": [r for r in rows if r["subset"] == "all"]}
     (out_dir / "report.json").write_text(json.dumps(result, indent=1) + "\n")
     for line in ev.summary_lines(rows, lat):
         log(line)
@@ -341,7 +376,8 @@ def report(weights, data_dir, out_dir, device: str = "auto", sets=("val", "heldo
 
 def publish(run_dir, log=print) -> None:
     """Copy a run's weights into submission/weights/ and its tables into training/logs/ (the
-    whole-episode table too, when `episodes.py` has written one into the run directory)."""
+    whole-episode table and the navigation table too, when `episodes.py` and `fallback.py` have
+    written them into the run directory)."""
     run_dir = Path(run_dir)
     (paths.SUBMISSION / "weights").mkdir(parents=True, exist_ok=True)
     LOGS.mkdir(parents=True, exist_ok=True)
@@ -353,6 +389,8 @@ def publish(run_dir, log=print) -> None:
         shutil.copyfile(run_dir / "robustness.csv", LOGS / "exit_detector_robustness.csv")
     if (run_dir / "episodes.csv").is_file():             # written by `python -m training.exitdet.episodes --csv`
         shutil.copyfile(run_dir / "episodes.csv", LOGS / "exit_detector_episodes.csv")
+    if (run_dir / "fallback.csv").is_file():             # written by `python -m training.exitdet.fallback --csv`
+        shutil.copyfile(run_dir / "fallback.csv", LOGS / "exit_detector_fallback.csv")
     log(f"published {ev.WEIGHTS} (sha256 {ev.file_sha256(ev.WEIGHTS)[:12]}) and training/logs/exit_detector.csv")
 
 
@@ -362,7 +400,11 @@ def main(argv=None) -> int:
     ap.add_argument("--tag", default="run")
     ap.add_argument("--device", default="auto", help="auto = cuda, else mps, else cpu")
     ap.add_argument("--max-train-frames", type=int, default=None, help="per training set")
-    ap.add_argument("--train-sets", default="train,extra,play", help="comma-separated sets to train on (those that exist)")
+    ap.add_argument("--train-sets", default="train,extra,play,play2",
+                    help="comma-separated sets to train on (those that exist); `fight` is the optional fifth one")
+    ap.add_argument("--init", default="", help="continue from these weights instead of starting from random ones")
+    ap.add_argument("--damage-flash", type=float, default=AugmentConfig().damage_flash,
+                    help="share of training frames that get the simulated red damage tint")
     ap.add_argument("--calib-sets", default="calib,play_calib", help="sets that, with val, the decision threshold is chosen on")
     ap.add_argument("--report-sets", default="val,heldout,unseen,heldout2,unseen2,weapons,play_heldout,padflats",
                     help="sets of the evaluation table (those that exist)")
@@ -385,6 +427,7 @@ def main(argv=None) -> int:
     weights = run_dir / "exit_detector.pt"
     if not args.report_only:
         weights = train(cfg, args.data, run_dir, args.device, args.max_train_frames, log=log,
+                        aug=AugmentConfig(damage_flash=args.damage_flash), init=args.init or None,
                         train_sets=present(args.train_sets), calib_sets=present(args.calib_sets))["weights"]
     report(weights, args.data, run_dir, args.device, sets=present(args.report_sets), log=log)
     if args.save:

@@ -406,8 +406,10 @@ def train(cfg: TrainConfig, maps: str, out: str, device_name: str = "auto", init
                     result = {"exit_rate": "", "episodes": 0}
                 heldout_rate, heldout_episodes = result["exit_rate"], result["episodes"]
                 weight = cfg.distill.report(heldout_rate if result["episodes"] else None)
+                best = cfg.distill.reference             # the best rate that stepped the weight down: the bar for the next step
                 print(f"held-out: exit rate {heldout_rate if heldout_rate == '' else format(heldout_rate, '.3f')} over "
-                      f"{result['episodes']} episodes -> distillation weight {weight}", flush=True)
+                      f"{result['episodes']} episodes (best so far {'-' if best is None else format(best, '.3f')}) "
+                      f"-> distillation weight {weight}", flush=True)
 
             row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "iteration": iteration, "env_steps": env_steps,
                    "stage": curriculum.stage, "device": device_text, "env_steps_per_s": per_iteration / (t2 - t0),

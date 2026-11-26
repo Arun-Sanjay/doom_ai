@@ -25,9 +25,11 @@ what a far exit pad is most easily confused with.
               began to record how much of the pad a monster or a corpse hides (`pad_cover`) and
               which weapon is held. The first two sets do not have those fields, so the rows of
               the evaluation table that need them (pad in clear view, pad covered) come from here.
-    fight     training: maps with monsters, most episodes a long look at the pad while the monsters
-              close in (the `fight` recipe below the set table); 15% of its maps draw the pad with
-              GATE1 or GATE2, two flats that differ from GATE3 by a few pixels
+    fight     optional training set: maps with monsters, most episodes a long look at the pad while
+              the monsters close in (the `fight` recipe below the set table); 15% of its maps draw
+              the pad with GATE1 or GATE2, two flats that differ from GATE3 by a few pixels. It was
+              used for one continued training run that changed nothing measurable (see train.py);
+              the published detector is trained without it
     padflats  monster-free and key maps whose pad is drawn with another flat than GATE3 (PAD_FLATS,
               one per map in turn): the other pad-pattern flats, plain red flats, flats that are
               not red. Evaluation only. It states a limit: the detector is trained to find the
@@ -138,7 +140,8 @@ PLAY_GOD, PLAY_AMMO = 0.7, 0.7   # share of `play` episodes with each cheat
 MINE_LOGIT = -1.0                # the mining detector "fires" from this logit (its threshold is 0)
 MINE_MISS_LOGIT = 1.0            # ... and "misses" a pad the label calls visible below this one
 MINE_KEEP = 0.6                  # probability of keeping a frame on which it is wrong in either way
-ROLES = {"train": "training", "extra": "training", "play": "training", "play2": "training", "fight": "training", "val": "watched during training; threshold",
+ROLES = {"train": "training", "extra": "training", "play": "training", "play2": "training",
+         "fight": "training (optional; not in the published weights)", "val": "watched during training; threshold",
          "calib": "threshold", "play_calib": "threshold", "heldout": "evaluation", "unseen": "evaluation",
          "weapons": "evaluation", "play_heldout": "evaluation", "heldout2": "evaluation", "unseen2": "evaluation",
          "padflats": "evaluation (pad drawn with other flats)"}
@@ -845,7 +848,7 @@ def write_overview(data_dir, path) -> Path:
     covered pads, mined frames): the small tracked record of what the detector was trained and tested on."""
     import csv
 
-    from training.exitdet.data import COVER_MAX, drawn, has_tag, pad_at_edge
+    from training.exitdet.data import COVER_MAX, cover_known, drawn, has_tag, pad_at_edge
 
     rows = []
     for name, cfg in SETS.items():
@@ -855,6 +858,7 @@ def write_overview(data_dir, path) -> Path:
         summary = json.loads((directory / "summary.json").read_text())
         data = load_set(directory, with_rgb=False)
         neg = ~data["visible"] & ~data["ambiguous"]
+        known = cover_known(data)                          # the first sets were collected before the cover was recorded
         row = {"set": name, "role": ROLES.get(name, ""), "first_seed": cfg["seed"], "texture_side": cfg["side"],
                "recipe": cfg.get("recipe", "views"), "maps": summary["maps"],
                "maps_reference_look": summary["looks"]["reference"], "maps_random_look": summary["looks"]["random"],
@@ -862,7 +866,9 @@ def write_overview(data_dir, path) -> Path:
                "visible": summary["visible"], "visible_share": round(summary["visible_share"], 4),
                "visible_0_200": summary["visible_0_200"], "visible_200_400": summary["visible_200_400"],
                "visible_400_640": summary["visible_400_640"], "visible_and_drawn": int(drawn(data).sum()),
-               "visible_but_covered_by_a_sprite": int((drawn(data) & (data["pad_cover"] >= COVER_MAX)).sum()),
+               "cover_recorded": int(known.all()),
+               "visible_but_covered_by_a_sprite": int((drawn(data) & (data["pad_cover"] >= COVER_MAX)).sum()) if known.all() else "",
+               "pad_flats": " ".join(sorted({(m.get("options") or {}).get("exit_floor", "GATE3") for m in data["maps"]})),
                "ambiguous": summary["ambiguous"], "negative": int(neg.sum()), "negative_pad_at_edge": int(pad_at_edge(data).sum()),
                "mined_frames": summary.get("mined_frames", 0), "miner": Path(summary.get("miner", "") or "").parent.name}
         for tag in TAGS:

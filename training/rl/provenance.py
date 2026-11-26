@@ -230,8 +230,19 @@ def to_json(record: dict | None) -> dict | None:
     out = dict(record)
     for key in ("network", "frontend"):
         if out.get(key) is not None:
-            out[key] = [[float(f"{v:.7g}") for v in row] for row in np.asarray(out[key], np.float64).reshape(-1, np.shape(out[key])[-1])]
+            out[key] = [[float(f"{v:.7g}") for v in row] for row in _host(out[key]).reshape(-1, np.shape(out[key])[-1])]
     return out
+
+
+def _host(values) -> np.ndarray:
+    """A stored signature (tensor or nested lists) as a float64 array in host memory.
+
+    A checkpoint is loaded with ``map_location=`` the learner's device, which moves the record's
+    tensors to the GPU along with the weights; numpy cannot read them there.
+    """
+    if hasattr(values, "detach"):
+        values = values.detach().to("cpu")
+    return np.asarray(values, np.float64)
 
 
 def record_of(payload) -> dict | None:
@@ -272,7 +283,7 @@ def compare(record: dict | None, policy, frontend: bool = True) -> Verdict:
     if record.get("probe_file") != p["sha256"]:
         return Verdict("unverified", ["the record was computed on other probe episodes than training/rl/probe_episodes.npz"])
     verdict = Verdict()
-    then = np.asarray(record["network"], np.float64).reshape(-1, NETWORK_FEATS)
+    then = _host(record["network"]).reshape(-1, NETWORK_FEATS)
     now = network_signature(policy).double().numpy().reshape(-1, NETWORK_FEATS)
     worst, count = _worst(now, then, NET_ATOL, NET_RTOL)
     if worst > 1.0:
@@ -286,7 +297,7 @@ def compare(record: dict | None, policy, frontend: bool = True) -> Verdict:
         if current is None:
             verdict.notes.append("the agent's front end is not importable here: its part of the record was not checked")
         else:
-            then_f = np.asarray(record["frontend"], np.float64).reshape(-1, FRONTEND_FEATS)
+            then_f = _host(record["frontend"]).reshape(-1, FRONTEND_FEATS)
             now_f = current.astype(np.float64)
             atol = np.array([FRONT_ATOL] * 5 + [FRONT_MAP_ATOL] * spec.MAP_CHANNELS)
             rtol = np.array([FRONT_RTOL] * 5 + [0.0] * spec.MAP_CHANNELS)

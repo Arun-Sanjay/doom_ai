@@ -68,7 +68,11 @@ Everything from the repository root on the box (/workspace/doom_ai), with the bo
      env_resets             rows restarted on a fresh map after an engine death or an exception (total of the run). The
                             first 20 are printed with their error. A handful per night is fine; a steady climb is not
      worker_respawns        worker processes replaced after dying; expected 0
-     odom_errors            odometry updates that raised (pose kept). Was the cause of two crashes of the combat run
+     odom_errors            odometry updates that raised (pose kept). Was the cause of two crashes of the combat run.
+                            Training keeps the pose and the map on such a step; submission/agent.py does not guard the
+                            same call and clears its pose, map and recurrent state instead (measured: 22 free cells -> 0).
+                            Until the agent does the same as training, every count here is a step the shipped agent
+                            would handle differently from what the policy was trained with
      teacher_errors         internal errors of the teacher (that step is not labelled); expected 0
      kl, clip_frac, ev      PPO on the steps the policy chose itself (kl includes what distillation changes there)
      kl_unlabelled, minibatches
@@ -88,13 +92,22 @@ Everything from the repository root on the box (/workspace/doom_ai), with the bo
                             field_rows is the share of manager steps it is applied on
      agree, agree_all       share of labelled head choices (and of whole steps) where the policy's most likely option is
                             the teacher's; agree_move / agree_strafe / agree_turn / agree_use per head. In the 25-minute
-                            laptop run agree reached 0.81-0.82 on mixed trajectories within 80,000 steps and stayed there
+                            laptop run agree reached 0.81-0.82 on mixed trajectories within 80,000 steps and stayed there.
+                            A health signal only, NOT the measure of imitation: the column is taken on the run's own
+                            trajectories and falls as beta falls (0.83 at its best, 0.78 at the end at beta 0.2 in the
+                            laptop run, where the final checkpoint scores 0.88 on teacher-driven states). Judge imitation
+                            as in step 5
      agree_subgoal, agree_target, target_cells_off     the manager; target_cells_off should fall below 2 cells
    what the run is for
      heldout_exit_rate, heldout_episodes, distill_weight
                             every 150 iterations the policy alone plays 384 held-out episodes; the line
-                            "held-out: exit rate X over 384 episodes -> distillation weight W" is printed. W steps down
-                            only when X >= 0.3 (min_rate) and X has not dropped more than 0.06 since the last step down
+                            "held-out: exit rate X over 384 episodes (best so far B) -> distillation weight W" is
+                            printed. W steps down only when X >= 0.3 (min_rate) and X >= B - 0.06 (tolerance), where B is
+                            the best rate of any report that stepped W down: B never falls, so a rate that slides a
+                            few points at every report stops the steps down once it is 0.06 below its best. Two
+                            reports in a row below B - 0.06 step W back up one level. With a steady true rate W
+                            reaches 0 after 5 reports at the median (7 at the 90th percentile; the reports are noisy)
+                            and steps back up one level about once in 20 reports (simulated, see unified_full.txt)
      exit_rate_t0..t4       recent exit rate per tier in training (while beta is high this is mostly the teacher's)
      exit_rate_labelled / exit_rate_unlabelled
                             training episodes with and without teacher labels. The unlabelled ones (start off the grid)
@@ -112,3 +125,37 @@ Everything from the repository root on the box (/workspace/doom_ai), with the bo
    export writes the agent's weights format and, with --episode, starts a real DoomAgent on the file (no untrained
    fallback) and plays one episode. Copy the file to submission/weights/policy.pt only after training/evaluate.py
    --compare says it is better than what is there.
+
+5. Judging a checkpoint of the run (during it or after it; ckpt_NNNNNN.pt or latest.pt)
+
+   Two measurements, both of the policy as the agent decodes it, both on held-out maps. Neither is a column of
+   the training log (see "agree" and "exit_rate_t*" above for why those are not enough).
+
+   a. Imitation, on states the teacher drives (16 workers x 10 environments x 256 steps):
+
+    $PY -m training.rl.agree --checkpoint runs/unified_full_1/latest.pt --maps data/maps/dev_nav/manifest.jsonl \
+        --beta 1 --workers 16 --envs-per-worker 10
+
+      "agree" is the mean over the labelled head choices (move, strafe, turn, USE); "agree_all" the share of steps
+      on which all four are the teacher's; agree_move / _strafe / _turn / _use the heads one by one. USE is "off"
+      on most steps and lifts the mean, so read the per-head numbers and agree_all next to it. --beta 0 gives
+      the same on states the policy drives itself into; that number is lower and is not the gate.
+
+   b. The policy alone, per tier (2 episodes per map; no teacher, no mixing):
+
+    $PY -m training.rl.eval_alone --checkpoint runs/unified_full_1/latest.pt --maps data/maps/dev_nav/manifest.jsonl \
+        --episodes 2 --workers 16
+    $PY -m training.rl.eval_alone --checkpoint runs/unified_full_1/latest.pt --maps data/maps/dev/manifest.jsonl \
+        --episodes 2 --workers 16
+
+      Read "tiers" in the output, one exit rate per tier, never the total alone: the total of a set moves with its
+      tier mix, and a tier the run has not reached yet in its curriculum counts as a failure of the policy.
+
+   Reference points, the 20-minute laptop check from a random start (tiers 0 and 2 only, 1.5 M steps; the gate it
+   was built for is written out in unified_smoke.txt next to this file):
+      a. 0.877 per labelled head, teacher driving (move 0.850, strafe 0.845, turn 0.816, USE 0.996); all four heads
+         at once 0.626; student driving 0.726.
+      b. tier 0: 0.78, tier 2: 0.51 of 120 episodes each on 60 held-out maps; tiers 3 and 4, never trained on: 0.20
+         and 0.43 of 40 episodes each.
+   The long run should pass both on every tier it has trained on. A checkpoint that scores lower on (b) than an
+   earlier one of the same run on the same maps has lost navigation, whatever the training columns say.

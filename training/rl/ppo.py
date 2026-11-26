@@ -394,10 +394,17 @@ class DistillSchedule:
     The weight moves along ``levels``. ``report(exit_rate)`` is called with a fresh held-out exit
     rate (the trainer calls it after each held-out evaluation):
 
-    * if the rate has not fallen by more than ``tolerance`` below the rate recorded at the last
-      step down, the weight steps down one level and that rate becomes the new reference;
+    * if the rate is no more than ``tolerance`` below the reference, the weight steps down one
+      level. The reference is the best rate of any report that passed this test, so it only
+      ever rises;
     * otherwise the weight holds; after ``patience`` such reports in a row it steps back up one
       level (the reference is kept, so the rate has to recover before the next step down).
+
+    Because the reference is the best rate and not the latest, ``tolerance`` bounds the whole
+    loss the schedule accepts, not the loss per step: a rate that slides down a little at every
+    report stops the steps down as soon as it is ``tolerance`` below its best, and the weight
+    then climbs back. (Comparing each report with the one before would let the rate fall by
+    ``tolerance`` at each of the five steps while the teacher is removed.)
 
     A rate below ``min_rate`` never steps the weight down: a policy that does not reach the exit
     yet "holds" its rate trivially, and lowering the weight then would remove the teacher before
@@ -427,7 +434,9 @@ class DistillSchedule:
             return self.weight
         if self.reference is None or exit_rate >= self.reference - self.tolerance:
             self.bad_reports = 0
-            self.reference = float(exit_rate)
+            # The best rate so far, never the latest: a rate within tolerance of the reference but
+            # below it must not lower the bar for the next report.
+            self.reference = float(exit_rate) if self.reference is None else max(self.reference, float(exit_rate))
             self.index = min(self.index + 1, len(self.levels) - 1)
         else:
             self.bad_reports += 1
@@ -443,6 +452,13 @@ class DistillSchedule:
     def load_state_dict(self, state: dict) -> None:
         self.index, self.reference = int(state["index"]), state["reference"]
         self.bad_reports, self.history = int(state["bad_reports"]), list(state.get("history", []))
+        # A state saved when the reference followed the latest step down: put it back at the best
+        # rate that stepped the weight down, read from the history (a no-op for a state saved since).
+        before = float(self.levels[0])
+        for rate, weight in self.history:
+            if weight < before and self.reference is not None:
+                self.reference = max(float(self.reference), float(rate))
+            before = weight
 
 
 # ---------------------------------------------------------------------------------------------

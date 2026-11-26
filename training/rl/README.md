@@ -87,6 +87,17 @@ heads of a step at once), `agree_move` / `_strafe` / `_turn` / `_use`, `agree_su
 `agree_target`, `target_cells_off`, `exit_rate_labelled` / `_unlabelled`, `heldout_exit_rate`,
 `distill_weight`, and the failure counters `env_resets`, `odom_errors`, `teacher_errors`.
 
+Distillation weight. `w_distill` moves along `distill.levels` and only on held-out evidence
+(`--heldout`, every `heldout_every` iterations the policy alone plays `heldout_envs` episodes with
+the agent's decoding). It steps down one level when the held-out exit rate is at least
+`distill.min_rate` and no more than `distill.tolerance` below the reference, and back up one level
+after `distill.patience` reports in a row below that bar. The reference is the best rate of any
+report that stepped the weight down, never the latest one: `tolerance` is the whole loss accepted
+on the way to weight 0, so a rate that slides a few points at every report cannot walk the weight
+down with it (reports 0.60, 0.55, 0.50, 0.45, 0.40 at tolerance 0.06 give weights 0.5, 0.25, 0.25,
+0.5, 0.5). The run prints the reference with every held-out line ("best so far"). Teacher mixing
+stops while the weight is 0.
+
 Failures that do not stop a run: an odometry update that raises keeps the last pose estimate
 (`odom_errors`); a failed held-out evaluation holds the distillation weight; and a failed engine or
 worker is replaced, in three layers (`vecenv.py`):
@@ -152,7 +163,12 @@ worker in `worker_respawns`.
 * `agree` in the training log is measured on the trajectories of the run, which are driven more
   and more by the policy as `beta` falls; the teacher's labels in states the policy got itself
   into are harder to predict, so the column falls with `beta` although imitation improves. Use
-  `python -m training.rl.agree --beta 1` for the number on teacher-driven states.
+  `python -m training.rl.agree --beta 1` for the number on teacher-driven states, and read
+  `agree_all` (every labelled head of a step at once) and the per-head numbers next to `agree`:
+  USE is "off" on most steps and lifts the pooled mean. A checkpoint is judged by that command and
+  by `python -m training.rl.eval_alone` per tier on held-out maps (`training/configs/LAUNCH.txt`,
+  step 5; the numbers of the laptop check and the definitions they hold under are in
+  `training/configs/unified_smoke.txt`).
 
 * `head_bias` (default `{"weapon": [2.5, -2.5]}`; `{}` turns it off) adds a starting offset to a
   head's output bias. The network starts near uniform, which means "next weapon" on half of all steps; the

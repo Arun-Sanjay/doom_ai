@@ -27,4 +27,16 @@ PPO alone. The manager still gets its label there (sub-goal "fight", target = th
 Distillation weight
   min_rate 0.3 (unified_nav: 0.5): the held-out maps contain monsters, where the teacher alone
   exits about one map in three, so 0.5 would hold the weight at 1 for too long. tolerance 0.06 with
-  384 episodes, as in unified_nav. 14 of the 80 dev maps have no exit; the rate is over the others.
+  384 episodes, as in unified_nav. 14 of the 80 dev maps have no exit; the rate is over the others
+  (about 317 of the 384 episodes).
+  The reference of the schedule is the best held-out rate that stepped the weight down (printed as
+  "best so far" on every held-out line), so 0.06 is the whole loss accepted before the steps down
+  stop, see unified_nav.txt. With min_rate as low as 0.3 this matters here: simulated with binomial
+  reports of 317 episodes over 20 reports (4000 runs each),
+                                              weight reaches 0        true rate lost by then
+    true rate steady at 0.60                  98 % of runs, at report 5 (median), 7 (90th pct)
+    true rate 0.60 falling 0.03 per report     1.4 % of runs          0.12 (mean), 0.15 (most)
+    true rate 0.60 falling 0.05 per report     0 %
+  and with a steady rate the weight steps back up one level 1.1 times per 20 reports. (A schedule
+  that compares each report with the previous step down reaches weight 0 in 38 % of the runs of the
+  second row, having lost up to 0.24.)

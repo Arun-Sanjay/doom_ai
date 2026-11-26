@@ -334,16 +334,66 @@ def test_distill_schedule_steps_down_only_while_exit_rate_holds():
     assert s.weight == 1.0
     assert s.report(None) == 1.0                    # no measurement: hold
     assert s.report(0.60) == 0.5                    # first measurement becomes the reference
-    assert s.report(0.58) == 0.25                   # within tolerance of 0.60: step down, reference 0.58
+    assert s.report(0.58) == 0.25                   # within tolerance of 0.60: step down
+    assert s.reference == pytest.approx(0.60)       # ... and the reference stays at the best rate, not the latest
     assert s.report(0.50) == 0.25                   # fell by more than the tolerance: hold
     assert s.report(0.51) == 0.5                    # still down after `patience` reports: step back up
-    assert s.report(0.54) == 0.5                    # reference is still 0.58: not recovered, hold
-    assert s.report(0.57) == 0.25                   # recovered: step down again
+    assert s.report(0.56) == 0.5                    # reference is still 0.60: not recovered, hold (against 0.58,
+    assert s.bad_reports == 1                       # the rate of the latest step down, 0.56 would have passed)
+    assert s.report(0.58) == 0.25                   # recovered: step down again
     assert s.report(0.60) == 0.0
     assert s.report(0.70) == 0.0                    # stays at the last level
     restored = DistillSchedule(levels=(1.0, 0.5, 0.25, 0.0))
     restored.load_state_dict(s.state_dict())
     assert restored.weight == 0.0 and restored.reference == pytest.approx(0.70)
+
+
+def test_distill_schedule_does_not_follow_a_slowly_falling_exit_rate():
+    """Each report is within the tolerance of the one before, and the rate loses 20 points in all.
+
+    With the settings of the full run (training/configs/unified_full.json). Compared with the
+    previous report every one of them "holds"; compared with the best one the third does not.
+    """
+    full = dict(levels=(1.0, 0.5, 0.25, 0.1, 0.03, 0.0), tolerance=0.06, patience=2, min_rate=0.3)
+    s = DistillSchedule(**full)
+    weights = [s.report(r) for r in (0.60, 0.55, 0.50, 0.45, 0.40)]
+    assert weights == [0.5, 0.25, 0.25, 0.5, 0.5]   # two steps down, then hold, then back up: never near zero
+    assert s.reference == pytest.approx(0.60)       # the bar did not follow the rate down
+    assert s.report(0.40) == 1.0                    # still 20 points down: the teacher is fully back
+    assert [s.report(r) for r in (0.50, 0.53)] == [1.0, 1.0] and s.index == 0     # better, not recovered: stays up
+    assert [s.report(r) for r in (0.55, 0.61, 0.66)] == [0.5, 0.25, 0.1] and s.reference == pytest.approx(0.66)
+
+    # The same for any slide: the weight never goes down on a rate more than the tolerance below the best so far.
+    rng = np.random.default_rng(0)
+    for trial in range(200):
+        s = DistillSchedule(**full)
+        rate, best, before = 0.3 + 0.5 * rng.random(), None, s.weight
+        for _ in range(40):
+            rate = float(np.clip(rate + rng.uniform(-0.07, 0.04), 0.0, 1.0))
+            after = s.report(rate)
+            if after < before:
+                assert rate >= full["min_rate"] and (best is None or rate >= best - full["tolerance"] - 1e-12)
+            at_last_level = s.index == len(s.levels) - 1 and after == before      # no level left to step down to
+            if after < before or (at_last_level and rate >= max(full["min_rate"], best - full["tolerance"])):
+                best = rate if best is None else max(best, rate)                  # a report that passed
+            assert s.reference == (None if best is None else pytest.approx(best))
+            before = after
+
+
+def test_distill_schedule_restores_the_best_rate_from_an_older_state():
+    """A state saved while the reference followed the latest step down (0.45 here) resumes with the best one."""
+    full = dict(levels=(1.0, 0.5, 0.25, 0.1, 0.03, 0.0), tolerance=0.06, patience=2, min_rate=0.3)
+    older = {"index": 4, "reference": 0.45, "bad_reports": 0, "history": [(0.2, 1.0), (0.60, 0.5), (0.55, 0.25), (0.50, 0.1), (0.45, 0.03)]}
+    s = DistillSchedule(**full)
+    s.load_state_dict(older)
+    assert s.weight == 0.03 and s.reference == pytest.approx(0.60)
+    assert [s.report(r) for r in (0.40, 0.40, 0.56)] == [0.03, 0.1, 0.03]      # 0.40 no longer steps down; 0.56 does
+    again = DistillSchedule(**full)
+    again.load_state_dict(s.state_dict())                                   # a state of the current rule loads unchanged
+    assert again.state_dict() == s.state_dict() and again.reference == pytest.approx(0.60)
+    fresh = DistillSchedule(**full)
+    fresh.load_state_dict(DistillSchedule(**full).state_dict())             # nothing reported yet
+    assert fresh.reference is None and fresh.weight == 1.0
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1201,6 +1251,40 @@ def test_checkpoint_carries_a_provenance_record_and_loads_while_the_code_is_unch
     # Other weights are another function: the record is specific to the network it was written for.
     other = deps.make_policy("real")
     assert provenance.compare(stored, other).status == "mismatch"
+
+
+def test_checkpoint_with_a_record_loads_on_the_learner_device(tmp_path):
+    """``--init`` and ``--resume`` load with ``map_location`` = the learner's device, record tensors included."""
+    pytest.importorskip("doomnet.model")
+    from training.rl import provenance
+    from training.rl.train import load_policy, load_weights
+    path, net, record = _real_checkpoint(tmp_path)
+
+    class OnDevice:
+        """A tensor that numpy cannot read where it is, as on CUDA or MPS (so the test also runs without a GPU)."""
+
+        def __init__(self, tensor):
+            self.tensor, self.shape = tensor, tensor.shape
+
+        def __array__(self, *args, **kwargs):
+            raise TypeError("can't convert cuda:0 device type tensor to numpy. Use Tensor.cpu() to copy the tensor to host memory first.")
+
+        def detach(self):
+            return self
+
+        def to(self, device):
+            assert str(device) == "cpu"
+            return self.tensor
+
+    moved = dict(record, network=OnDevice(record["network"]), frontend=OnDevice(record["frontend"]))
+    verdict = provenance.compare(moved, net)
+    assert verdict.status == "ok" and not verdict.problems
+    assert provenance.to_json(moved) == provenance.to_json(record)
+    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else None
+    if device:                                                                 # and the real thing where there is a GPU
+        policy, payload = load_policy(str(path), device)
+        assert payload["provenance"]["network"].device.type == device and next(policy.parameters()).device.type == device
+        assert load_weights(deps.make_policy("real").to(device), str(path), device)["iteration"] == 2
 
 
 def test_checkpoint_is_refused_when_the_forward_pass_was_edited(tmp_path, monkeypatch, capsys):

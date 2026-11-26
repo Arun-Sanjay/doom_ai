@@ -372,6 +372,87 @@ def test_front_end_keeps_the_pose_when_odometry_raises():
     assert front.odom_errors == 2
 
 
+def _one_odometry_error_in_both_pipelines(tmp_path, monkeypatch, fail_at: int = 30, steps: int = 45) -> dict:
+    """Play a real map with a ``DoomAgent`` while training's front end reads the same observations.
+
+    The real ``Odometry.update`` raises once, at decision ``fail_at``, in both. Returns, for the
+    training front end and for the agent, the pose estimate and the number of free cells in the
+    map crop just before and just after that decision, and the error counters at the end.
+    """
+    pytest.importorskip("doom_env")
+    import agent as agent_module
+    from doom_env import action_space, observation_space
+    from doomnet import odometry
+
+    switch = {"raise": False}
+    real_update = odometry.Odometry.update
+
+    def update(self, prev_action, obs):
+        if switch["raise"]:
+            raise TypeError("cannot unpack non-iterable NoneType object")
+        return real_update(self, prev_action, obs)
+
+    free = lambda crop: int((np.asarray(crop)[spec.CH_FREE] > 0).sum())
+    (tmp_path / "no-weights").mkdir()
+    monkeypatch.setattr(agent_module, "WEIGHTS_DIR", tmp_path / "no-weights")    # initial weights: the test is about the state
+    monkeypatch.setenv(agent_module.ALLOW_UNTRAINED_ENV, "1")
+    monkeypatch.setattr(odometry.Odometry, "update", update)
+    threads = torch.get_num_threads()
+    wad = _wad(tmp_path, "#########\n#P......#\n#.......#\n#...#...#\n#.......#\n#########")
+    env = deps.make_env(deps.MapEntry(wad, 0, 2100), render_buffers=True)
+    out = {}
+    try:
+        player = agent_module.DoomAgent(observation_space(), action_space(), "cpu")
+        player.governor_ms = (1e9, 1e9)                                          # machine load must not change the decisions
+        front = deps.FrontEnd("real")
+        obs, _ = env.reset(seed=0)
+        player.reset()
+        front.reset()
+        prev = None
+        for t in range(steps):
+            if t == fail_at:
+                out["before"] = {"train": (pose, free(crop)),
+                                 "agent": (tuple(player.pose_estimate()), free(player.memory.crop(player.pose_estimate())))}
+            switch["raise"] = t == fail_at
+            action = player.act(obs)
+            _, crop, pose = front.observe(obs, prev, t, 525.0, None)
+            switch["raise"] = False
+            if t == fail_at:
+                out["after"] = {"train": (pose, free(crop)),
+                                "agent": (tuple(player.pose_estimate()), free(player.memory.crop(player.pose_estimate())))}
+                out["agent_action_at_error"] = np.asarray(action).copy()
+            prev = action
+            obs, _, terminated, truncated, _ = env.step(action)
+            assert not (terminated or truncated)
+        out["odom_errors"], out["agent_failures"], out["last_odom_error"] = front.odom_errors, int(player.failures), front.last_odom_error
+    finally:
+        env.close()
+        torch.set_num_threads(threads)
+    return out
+
+
+@pytest.mark.slow
+def test_real_front_end_keeps_pose_and_map_when_odometry_raises(tmp_path, monkeypatch):
+    out = _one_odometry_error_in_both_pipelines(tmp_path, monkeypatch)
+    (pose_before, free_before), (pose_after, free_after) = out["before"]["train"], out["after"]["train"]
+    assert out["odom_errors"] == 1 and "NoneType" in out["last_odom_error"]
+    assert pose_after == pose_before                                             # the last estimate is kept
+    assert free_before > 0 and free_after >= free_before                         # and so is the map built so far
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(strict=False, reason="submission/agent.py calls odometry.update without a guard: the exception reaches act()'s "
+                                        "handler, which clears pose, map and recurrent state and answers with no buttons, while "
+                                        "training's front end keeps them. Reported to the agent's owner; not a training/rl file.")
+def test_agent_handles_an_odometry_error_like_the_training_front_end(tmp_path, monkeypatch):
+    """What the policy is trained with after an odometry error (pose and map kept) is what the agent must give it."""
+    out = _one_odometry_error_in_both_pipelines(tmp_path, monkeypatch)
+    (pose_before, free_before), (pose_after, free_after) = out["before"]["agent"], out["after"]["agent"]
+    assert out["agent_failures"] == 0 and free_before > 0
+    assert pose_after == pytest.approx(pose_before) and free_after >= free_before
+    assert pose_after == pytest.approx(out["after"]["train"][0])                 # the same estimate as in training
+
+
 class _Flaky(standins.ToyBandit):
     """A toy environment whose engine "dies": every call after ``fail_at`` steps raises."""
 
@@ -514,6 +595,31 @@ def test_heldout_callback_runs_and_drives_the_distillation_weight(tmp_path):
     assert [r["heldout_episodes"] for r in rows] == ["4", "4"] and all(r["heldout_exit_rate"] != "" for r in rows)
     assert [float(r["distill_weight"]) for r in rows] == [0.5, 0.25]       # each report within tolerance steps the weight down
     assert len(cfg.distill.history) == 2
+
+
+@pytest.mark.parametrize("name", ("unified_full.json", "unified_nav.json"))
+def test_trainer_keeps_the_teacher_while_the_heldout_exit_rate_slides(name, tmp_path, monkeypatch, capsys):
+    """Held-out rates that lose five points per report, with the distillation settings of the box configs.
+
+    Every report is within the tolerance of the one before it. The weight must not follow it to
+    zero, and teacher mixing (beta) must not be switched off, which the trainer does at weight zero.
+    """
+    from training.rl import train as trainer
+    settings = json.loads((CONFIGS / name).read_text())["distill"]
+    top = max(0.60, settings["min_rate"] + 0.10)
+    slide = [top - 0.05 * k for k in range(5)] + [top - 0.20]
+    reports = iter(slide)
+    monkeypatch.setattr(trainer, "heldout_exit_rate", lambda *args, **kwargs: {"exit_rate": next(reports), "episodes": 384})
+    cfg = trainer.apply_overrides(trainer.TrainConfig(), {
+        "workers": 0, "envs_per_worker": 4, "groups": 2, "rollout": 16, "policy": "standin", "heldout_every": 1,
+        "ppo": {"chunk": 8, "minibatch_chunks": 4, "epochs": 1}, "vec": {"frontend": "standin"},
+        "teach": {"beta_start": 1.0, "beta_floor": 0.1, "beta_steps": 100}, "distill": settings})
+    trainer.train(cfg, "toy:bandit", str(tmp_path), device_name="cpu", heldout="toy:bandit", max_iterations=len(slide))
+    rows = list(csv.DictReader((tmp_path / "train_log.csv").open()))
+    assert [float(r["heldout_exit_rate"]) for r in rows] == pytest.approx(slide)
+    assert [float(r["distill_weight"]) for r in rows] == [0.5, 0.25, 0.25, 0.5, 0.5, 1.0]
+    assert all(float(r["beta"]) > 0.0 for r in rows) and cfg.distill.reference == pytest.approx(top)
+    assert f"(best so far {top:.3f}) -> distillation weight 1.0" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("name", sorted(p.name for p in CONFIGS.glob("*.json")))

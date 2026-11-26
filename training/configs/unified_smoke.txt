@@ -16,3 +16,39 @@ initialisation. Results: training/logs/unified_smoke.txt and unified_smoke.csv.
   curriculum: one stage, tier 0 and tier 2 half each, no thresholds.
   ppo.bootstrap_on_truncation false: the tick cap is terminal.
   total_steps 1.5 M spans the learning-rate schedule (5e-4 -> 1.5e-4).
+
+The proof gate of this check, and how it is recorded
+  The check had two marks: (a) the distillation loss falls and the policy agrees with the teacher on
+  at least 85 % of labelled choices; (b) the policy alone exits at least 50 % of held-out maps. What
+  the run of training/logs/unified_smoke.txt (1.5 M steps, 19.7 minutes) reached, with the
+  definition under which each mark is and is not met:
+
+  (a) MET ONLY for the mean over labelled head choices on states the teacher drives; not met
+      for whole steps, not met on the policy's own states, never met by the training log's column.
+        python -m training.rl.agree --checkpoint CKPT --maps HELDOUT --beta 1 --steps 192
+                                         per labelled head   move    strafe   turn    USE     all four heads at once
+        teacher drives (--beta 1)             0.877          0.850   0.845    0.816   0.996        0.626
+        policy drives  (--beta 0)             0.726          0.624   0.666    0.650   0.966        0.342
+        column "agree" of the training log    0.827 at its best (beta 0.76); 0.73 to 0.80 once beta is 0.2 (0.78 over the last 20 iterations)
+      "Per labelled head" pools the four labelled heads; USE is "off" on nearly every step, so the
+      pooled number is above each of move, strafe and turn. The distillation loss fell from 8.91 to
+      3.1-3.5.
+  (b) MET on the tiers the run trained on (0 and 2): 155 exits in 240 episodes, 0.65.
+        python -m training.rl.eval_alone --checkpoint CKPT --maps HELDOUT --episodes 2 --seed 11   (and --seed 12)
+        tier 0     94 / 120   0.78
+        tier 2     61 / 120   0.51      (0.57 and 0.45 in the two runs of 60 episodes: at the mark, not clear of it)
+      NOT met on tiers 3 and 4 of dev_nav_v1, which this run never trained on: 8 / 40 and 17 / 40
+      (0.20 and 0.43); with them the three-tier set gives 50 / 120, 0.42. That figure measures tiers
+      outside the run and is not the gate.
+      Through the real agent (submission/agent.py with the exported weights and the exit detector
+      network, one episode per map): 42 / 60, 0.70 (tier 0 25 / 30, tier 2 17 / 30).
+
+  HELDOUT for the numbers above: 60 monster-free maps, 30 each of tiers 0 and 2, generated from seeds
+  700000 to 700050 (the training manifest uses seeds 0 to 300), all with the start on the 64-unit
+  grid, so every step is labelled. Both agreement rows and both eval_alone runs were measured by the
+  reviewer of the loop and repeated afterwards with the same commands: the same numbers to the last
+  digit and the same counts per tier (the measurements are deterministic for a seed).
+
+  For the long run the same two measurements are the yardstick, per tier: LAUNCH.txt, step 5. The
+  "agree" column of the training log is not: it is taken on trajectories that the policy drives
+  more and more, and it falls while imitation improves.

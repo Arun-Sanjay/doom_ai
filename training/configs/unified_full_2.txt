@@ -1,0 +1,12 @@
+unified_full_2.json: second phase of the unified run.
+
+Started with --init from the last checkpoint of runs/unified_full_1 (44M+ environment steps), on the
+cleaner map set data/maps/train_v2 (3,000 maps, 90% with an on-grid start so the teacher can label them).
+
+Differences from unified_full.json:
+- teach: beta starts at 0.15 and reaches its floor of 0.1 within 5M steps: the student already drives about 90% of labelled steps.
+- distill: the weight starts at 0.25 (the first phase had stepped it down to 0.1 at a held-out exit
+  rate of 0.63); it steps down further only while the held-out exit rate holds.
+- curriculum: all tiers from the first step, weighted towards tier 4 (gauntlets), which the first
+  phase had not reached; after 30M steps sampling follows the tier with the lowest exit rate.
+- learning rate restarts at 2e-4 (a new optimiser is created by --init).

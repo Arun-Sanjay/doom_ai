@@ -223,7 +223,9 @@ def subsets(data: dict) -> dict[str, np.ndarray]:
     """Frame selections reported for a set: all frames; the maps in the reference look and in a
     random look; the maps of each tier; frames with and without a monster in view; frames with and
     without the red damage tint; (where the collector recorded it) the frames by the weapon the
-    player holds; and, in a set built with other pad flats, the maps of each flat."""
+    player holds; and the maps of each pad flat, where maps name one. A set in which every map
+    names one (`padflats`) is reported as a whole and by flat only: pooled over flats it is a
+    mixture that describes nothing."""
     n = len(data["visible"])
     out = {"all": np.ones(n, bool)}
 
@@ -231,6 +233,9 @@ def subsets(data: dict) -> dict[str, np.ndarray]:
         values = np.array([key(m) for m in data["maps"]], dtype=object)
         return values[data["map_id"]] if len(values) else np.full(n, default, dtype=object)
 
+    flat = per_map(lambda m: (m.get("options") or {}).get("exit_floor", ""), "")
+    if n and (flat != "").all():                            # a pad-flat set: a mixture of flats, only the flats mean anything
+        return out | {f"pad flat {name}": flat == name for name in sorted(set(flat.tolist()))}
     look = per_map(lambda m: m.get("look", ""), "")
     for name in ("reference", "random"):
         if (look == name).any():
@@ -246,7 +251,6 @@ def subsets(data: dict) -> dict[str, np.ndarray]:
     for slot, name in WEAPON_SLOTS.items():                 # only in sets collected with the weapon recorded
         if (data["weapon"] == slot).any():
             out[f"holding {name}"] = data["weapon"] == slot
-    flat = per_map(lambda m: (m.get("options") or {}).get("exit_floor", ""), "")
     for name in sorted(set(flat.tolist()) - {""}):
         out[f"pad flat {name}"] = flat == name
     return out
@@ -372,6 +376,31 @@ def write_csv(rows: list[dict], path=LOG_CSV, extra: dict | None = None) -> Path
     return path
 
 
+COMPARE_SUBSETS = ("all", "tier 1", "tier 3", "tier 4", "monster in view", "no monster in view", "damage tint", "no damage tint")
+COMPARE_COLUMNS = ("frames", "precision", "false_positives", "fp_per_1000_all", "n_0_400", "recall_0_400", "recall_0_400_lo95",
+                   "recall_0_400_hi95", "n_clear_0_400", "recall_clear_0_400", "n_covered_0_400", "recall_covered_0_400",
+                   "recall_400_640", "pos_err_median_0_400")
+
+
+def compare_tables(tables: dict, sets=None, subsets=COMPARE_SUBSETS, columns=COMPARE_COLUMNS) -> list[dict]:
+    """Rows of several evaluation tables side by side: {label: table.csv} -> one row per (set, subset, label).
+
+    Only (set, subset) pairs present in every table are kept, so two detectors are compared on the same frames."""
+    loaded = {}
+    for label, path in tables.items():
+        with Path(path).open() as f:
+            loaded[label] = {(r["set"], r["subset"]): r for r in csv.DictReader(f)}
+    first = next(iter(loaded.values()))
+    out = []
+    for key, row in first.items():
+        if key[1] not in subsets or (sets and key[0] not in sets) or not all(key in t for t in loaded.values()):
+            continue
+        for label, table in loaded.items():
+            out.append({"set": key[0], "subset": key[1], "detector": label, "weights_sha256": table[key].get("weights_sha256", ""),
+                        **{c: table[key].get(c, "") for c in columns}})
+    return out
+
+
 def summary_lines(rows: list[dict], lat: dict | None = None) -> list[str]:
     out = []
     for r in rows:
@@ -397,7 +426,17 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--csv", default="", help="write the table here (default: print only)")
     ap.add_argument("--robustness", default="", help="instead: evaluate this set under fixed colour changes, blur and noise")
+    ap.add_argument("--compare", nargs="+", default=[], metavar="LABEL=TABLE.csv",
+                    help="instead: put rows of tables written earlier side by side (with --csv), e.g. two detectors")
     args = ap.parse_args(argv)
+    if args.compare:
+        rows = compare_tables(dict(item.split("=", 1) for item in args.compare), [s for s in args.sets.split(",") if s])
+        for r in rows:
+            print(f"{r['set']:>12} {r['subset']:<18} {r['detector']:<34} precision {r['precision']}  FP/1000 {r['fp_per_1000_all']}  "
+                  f"recall 0-400 {r['recall_0_400']} (n={r['n_0_400']})  clear view {r['recall_clear_0_400']} (n={r['n_clear_0_400']})")
+        if args.csv:
+            print("wrote", write_csv(rows, args.csv))
+        return 0
     model, config = load_detector(args.weights)
     if args.robustness:
         rows = robustness(model, args.data, args.robustness, args.device)

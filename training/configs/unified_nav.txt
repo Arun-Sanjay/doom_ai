@@ -59,10 +59,19 @@ Distillation weight (distill), driven by the held-out exit rate
   Every heldout_every = 150 iterations (about 11 M steps) the policy alone plays one episode in each
   of heldout_envs = 384 environments on the --heldout maps with the agent's decoding and the
   evaluation budget. The weight steps down one level (1 -> 0.5 -> 0.25 -> 0.1 -> 0.03 -> 0) when that
-  rate is at least min_rate and has not fallen more than tolerance below the rate at the last step
-  down; two bad reports in a row step it back up.
+  rate is at least min_rate and no more than tolerance below the reference; two bad reports in a
+  row step it back up. The reference is the best rate of any report that stepped the weight down,
+  not the latest one, so tolerance is the whole loss the schedule accepts on the way to weight 0: a
+  rate that loses a few points at every report (0.60, 0.55, 0.50, 0.45, 0.40) stops the steps down
+  at its third report and has the weight back at 1 by the sixth. Each held-out line of the run's
+  output prints the reference as "best so far".
   tolerance 0.06 (default 0.03): 384 episodes give a standard error of at most 0.026 per
-  measurement, 0.036 for the difference of two, so 0.03 would be inside the noise.
+  measurement, 0.036 for the difference of two, so 0.03 would be inside the noise. The best of
+  several noisy reports lies above the true rate, so with a steady true rate a report now and then
+  falls below the bar: simulated (binomial reports of 384 episodes, true rate 0.60, 20 reports) the
+  weight reaches 0 at report 5 at the median and report 6 at the 90th percentile, and steps back up
+  one level 0.8 times per 20 reports. If the weight keeps flapping at the low levels late in a run,
+  0.08 is the calmer setting; it accepts two more points of loss.
   min_rate 0.5: while the policy alone exits less than half of the held-out maps the weight stays at 1.
 
 Curriculum
