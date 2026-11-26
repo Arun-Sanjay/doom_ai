@@ -93,7 +93,7 @@ LATENCY_BUDGET_MS = 20.0     # mean act() time on one thread: the project's bind
 SIZE_LIMIT_MB = 50.0         # submission directory with weights; the repository limit is 1 GB
 # Environment switches that change how the agent plays or loads: never inherited by a scoring or gate run.
 AGENT_SWITCHES = ("DOOMNET_ALLOW_UNTRAINED", "DOOMNET_BUDGET_STEPS", "DOOMRL_ALLOW_MISMATCH", "DOOMNET_FUZZ_BUDGET_MS",
-                  "DOOMNET_DOOR_POLICIES")
+                  "DOOMNET_DOOR_POLICIES", "DOOMNET_GREEDY_HEADS")
 THREAD_ENV = {"OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1"}
 POLICY_NAME = "weights/policy.pt"
 # Files that never count when a candidate's submission directory is compared with the working tree's.

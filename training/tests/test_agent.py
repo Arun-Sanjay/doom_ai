@@ -8,6 +8,10 @@ what a failure at each stage costs, the time governor, the time-budget input and
 Unless a test says otherwise the agent is built with DOOMNET_ALLOW_UNTRAINED=1 and an empty weights
 folder, so every network has its initial weights and the tests do not depend on what is committed
 under submission/weights. The files that are committed there are checked by two tests of their own.
+
+The decoding override DOOMNET_GREEDY_HEADS is removed before every test, so the shell cannot change
+what is tested. One test does the opposite and fails when the run was started with it set: the ship
+gate runs this file, and nothing that ships may be gated in a shell that decodes by an override.
 """
 
 from __future__ import annotations
@@ -35,6 +39,8 @@ ROOT = Path(__file__).resolve().parents[2]
 TWO_ROOMS = ROOT / "maps" / "two_rooms.wad"
 COMMITTED_WEIGHTS = agent_module.WEIGHTS_DIR         # submission/weights, before the fixture below swaps it
 ZEROS = np.zeros(9, np.int8)
+# DOOMNET_GREEDY_HEADS as the shell handed it to this test run, read before the `untrained` fixture removes it.
+INHERITED_DECODING_OVERRIDE = os.environ.get(agent_module.GREEDY_ENV, "").strip()
 SUBMODULE_CALLS = ("odometry.update", "exit_detector.forward", "memory.update", "encoder.encode", "memory.crop", "policy.forward")
 
 
@@ -689,6 +695,39 @@ def test_override_takes_every_head_by_most_likely_choice_and_a_map_still_repeats
     for (_, a), (_, b), (_, c) in zip(first, again, other):
         assert np.array_equal(a, b) and np.array_equal(a, c)
     assert agent.failures == 0
+
+
+def test_this_run_did_not_inherit_a_decoding_override():
+    """Nothing that ships may be measured under DOOMNET_GREEDY_HEADS: the scorer never sets it.
+
+    The variable is for evaluation runs that compare decoding settings. A shell that still has it
+    set hands it to whatever is started there: a scoring run, and the ship gate, which runs this
+    file in the same environment as its validator and latency steps. Every other test here removes
+    the variable before it builds an agent; this one fails on it, so a gate run that inherited the
+    override cannot pass (and passes again once the gate removes the variable itself, as it does
+    for the other switches). A non-default decoding ships through the policy file's
+    config["greedy_heads"] only.
+    """
+    assert not INHERITED_DECODING_OVERRIDE, (
+        f"this test run was started with {agent_module.GREEDY_ENV}={INHERITED_DECODING_OVERRIDE} in its environment. "
+        "Agents built from this shell (scoring runs, the ship gate's validator and latency steps) decode by that "
+        "override, not by the setting stored with the weights, which is what the scorer will run. Unset it and run "
+        f'again; to ship another decoding, write config["{agent_module.GREEDY_KEY}"] into the policy file.')
+
+
+@pytest.mark.parametrize("value, passes", [("all", False), (None, True)], ids=["set", "unset"])
+def test_the_check_for_an_inherited_override_sees_the_shell_of_the_run(value, passes):
+    """The test above, run alone in a fresh interpreter with and without the variable (here a fixture has removed it)."""
+    environment = {k: v for k, v in os.environ.items() if k not in (agent_module.GREEDY_ENV, "PYTEST_ADDOPTS")}
+    if value is not None:
+        environment[agent_module.GREEDY_ENV] = value
+    done = subprocess.run([sys.executable, "-m", "pytest", f"{Path(__file__).resolve()}::test_this_run_did_not_inherit_a_decoding_override",
+                           "-q", "--no-header", "-p", "no:cacheprovider"],
+                          cwd=str(ROOT), env=environment, capture_output=True, text=True, timeout=300)
+    assert (done.returncode == 0) == passes, done.stdout[-2000:] + done.stderr[-2000:]
+    assert ("1 passed" if passes else "1 failed") in done.stdout
+    if not passes:
+        assert f"{agent_module.GREEDY_ENV}={value}" in done.stdout and 'config["greedy_heads"]' in done.stdout
 
 
 def test_masks_are_applied_before_decoding():

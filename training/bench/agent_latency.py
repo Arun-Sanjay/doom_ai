@@ -24,6 +24,13 @@ What is printed
     network on manager steps and on other steps, and decoding. The hook costs about a microsecond
     per decision.
 
+Also counted, because either would make the times mean something else: decisions on which the
+agent's time governor was engaged (it rests the networks on every second decision, so such a
+decision is cheaper than a full one), and faults inside the agent: decisions answered with no
+buttons, pose updates that raised and were survived, and measurements that failed inside the
+odometry module (its own `errors` counter, read from `debug_state()` before every reset). The
+first two kinds of fault count as failures of the run; the third is printed as a warning.
+
 The whole measurement is repeated `--repeats` times. The tables show the repeat with the lowest
 mean, and the range of the repeats' means says how noisy the machine was; the load average at the
 start is printed too, with a warning when other jobs were using the machine. Targets: TARGET_MAC_MS
@@ -109,6 +116,7 @@ def time_map(agent, env, steps: int, seed: int, clock: StageClock) -> dict:
     obs, _ = env.reset(seed=seed)
     agent.reset()
     ms, first, manager, episodes = [], [], [], 1
+    governed = module_errors = 0
     fresh = True
     manager_calls = clock.seconds["policy_manager"]
     for _ in range(steps):
@@ -119,6 +127,7 @@ def time_map(agent, env, steps: int, seed: int, clock: StageClock) -> dict:
         dt = 1000.0 * (time.perf_counter() - t0)
         ms.append(dt)
         manager.append(len(manager_calls) > before)
+        governed += int(getattr(agent, "governor_level", 0) > 0)
         if fresh:
             first.append(dt)
             fresh = False
@@ -126,11 +135,21 @@ def time_map(agent, env, steps: int, seed: int, clock: StageClock) -> dict:
         if terminated or truncated:
             seed += 1
             episodes += 1
+            module_errors += odometry_errors(agent)
             obs, _ = env.reset(seed=seed)
             agent.reset()
             fresh = True
+    module_errors += odometry_errors(agent)
+    # "failures" and "odometry_failures" are the agent's own counters, which run from the moment it was built.
     return {"ms": np.array(ms), "manager": np.array(manager), "first_ms": first, "episodes": episodes,
-            "failures": int(agent.failures)}
+            "failures": int(agent.failures) + int(getattr(agent, "odometry_failures", 0)),
+            "odometry_failures": int(getattr(agent, "odometry_failures", 0)),
+            "odometry_errors": module_errors, "governed": governed}
+
+
+def odometry_errors(agent) -> int:
+    """The odometry module's own error count for the map being played (it starts again at every reset())."""
+    return int(agent.debug_state().get("odometry_errors") or 0)
 
 
 def stats(ms) -> dict:
@@ -174,6 +193,9 @@ def run(steps: int, repeats: int, seed: int = 0, log=print) -> dict:
                     "maps": [dict(stats(p["ms"]), episodes=p["episodes"], first_ms=p["first_ms"]) for p in per_map],
                     "first_act_ms": per_map[0]["first_ms"][0],
                     "failures": per_map[-1]["failures"],
+                    "odometry_failures": per_map[-1]["odometry_failures"],
+                    "odometry_errors": sum(p["odometry_errors"] for p in per_map),
+                    "governed": sum(p["governed"] for p in per_map),
                     "stages": {name: {"calls": len(v), "mean_us": 1e6 * float(np.mean(v)) if v else 0.0,
                                       "p95_us": 1e6 * float(np.percentile(v, 95)) if v else 0.0,
                                       "per_step_us": 1e6 * float(np.sum(v)) / n} for name, v in clock.seconds.items()},
@@ -222,9 +244,20 @@ def report(result: dict, log=print) -> bool:
     log(f"first act() after the agent was built: {result['first_act_after_build_ms']:.3f} ms")
     log(f"first act() after reset(), {len(firsts)} resets: mean {np.mean(firsts):.3f} ms, max {np.max(firsts):.3f} ms "
         f"(it always includes a manager pass; mean of such decisions {best['manager_steps']['mean']:.3f} ms)")
-    failures = sum(r["failures"] for r in result["repeats"])
-    if failures:
-        log(f"WARNING: {failures} decisions raised inside the agent and were answered with no buttons")
+    last = result["repeats"][-1]                 # the agent's counters are never reset: the last repeat holds the totals
+    failures, lost_poses = last["failures"], last.get("odometry_failures", 0)
+    if failures - lost_poses:
+        log(f"WARNING: {failures - lost_poses} decisions raised inside the agent and were answered with no buttons")
+    if lost_poses:
+        log(f"WARNING: {lost_poses} pose updates raised inside the agent; it kept its pose and went on")
+    module_errors = sum(r.get("odometry_errors", 0) for r in result["repeats"])
+    if module_errors:
+        log(f"WARNING: {module_errors} measurements failed inside the odometry module, which kept its model's answer "
+            "(see debug_state()['odometry_last_error'])")
+    governed = sum(r.get("governed", 0) for r in result["repeats"])
+    if governed:
+        log(f"WARNING: the time governor was engaged on {governed} decisions, so those were not full decisions: "
+            "the machine was too slow or too busy for this to be the agent's own time")
     ok = a["mean"] <= result["target_ms"]
     log(f"mean {a['mean']:.3f} ms  p95 {a['p95']:.3f} ms  max {a['max']:.3f} ms  "
         f"(target on this machine: mean <= {result['target_ms']:g} ms) -> {'OK' if ok else 'OVER TARGET'}")
