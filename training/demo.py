@@ -24,6 +24,8 @@ Outputs, all inside the `--out` directory:
     sheet_even.png   contact sheet: 4 x 4 panels sampled evenly over the episode
     sheet_final.png  contact sheet: the final 16 decision steps
     trace.csv        one row per decision step: action, sub-goal, target, poses, drift, running totals
+                     (target_i, target_j: the target as a cell of the current crop; target_ref: how
+                     it was reported: xy, cell, origin, or held when its crop had to be inferred)
     episode.json     the runner's result row, the output paths, timings and any warnings
     map.wad          the compiled map, when the map was given as a grid
 
@@ -35,7 +37,8 @@ picture is fixed on the whole map and as large as the map allows; the cells are 
 the crop, which is centred on the agent, and `--zoom 1` shows the crop exactly as the network
 gets it. On the picture: the pose estimate (ring and heading line), the true position brought into
 the same frame (magenta dot, so drift shows as the dot leaving the ring), and the target cell if
-the policy reports one (yellow box, with the planned route when that is reported too). The text
+the policy reports one (yellow box, with the planned route when that is reported too; a `~` before
+the target in the text strip means its place was inferred, see "target" below). The text
 strip gives the step and tic, the sub-goal name, the pose estimate (x, y, heading in degrees)
 against the true pose with the drift, and the scorer's running totals (sectors, keys, doors,
 locked doors, kills, health, damage, cells, distance to the exit, stuck rate, door reversals,
@@ -60,10 +63,16 @@ which is where `runner.AgentPolicy` keeps the submission's agent):
                       or `cap` for the true cap) or logged with the episode; the teacher has this hook
     debug_state()     -> dict, every key optional:
         "subgoal"        index into spec.SUBGOALS, or a name
-        "target"         crop cell index i * CROP_SIZE + j, or (i, j), in the crop centred on the agent
-        "target_origin"  `memory.crop_origin(pose)` of the crop the target was chosen in, when that is
-                         not the current one (a manager's choice is held for several steps)
-        "target_cell"    the target as a start-frame cell (cx, cy); cell k spans [64k - 32, 64k + 32)
+        "target"         crop cell index i * CROP_SIZE + j, or (i, j), in the crop the target was chosen in
+        "target_origin"  `memory.crop_origin(pose)` of that crop. A manager's choice is held for
+                         several steps while the crop moves with the agent, so the index alone does
+                         not say which cell is meant. Without this key (and without "target_cell")
+                         the viewer takes the crop of the step at which the reported index last
+                         changed or a manager period began (step % MANAGER_PERIOD == 0, the schedule
+                         of PolicyNet), marks the target with `~` and warns once: that is exact for
+                         a choice held on that schedule and a guess for anything else
+        "target_cell"    the target as a start-frame cell (cx, cy); cell k spans [64k - 32, 64k + 32);
+                         wins over "target"
         "target_xy"      the target as (x, y) in start-frame map units; wins over the other forms
         "cell"           the agent's own start-frame cell. When it is given, a pair in "target" is
                          read as a start-frame cell as well (this is how the teacher reports)
@@ -172,7 +181,7 @@ STEP_TICS = spec.FRAME_SKIP
 NAN = float("nan")
 
 NOTE_ORDER = ("mode", "cell", "heads", "use_age", "keys", "fight", "travel", "decided")     # debug values shown first
-TRACE_FIELDS = ("step", "tic", "action", "acted", "subgoal", "target_i", "target_j", "est_x", "est_y", "est_heading_deg",
+TRACE_FIELDS = ("step", "tic", "action", "acted", "subgoal", "target_i", "target_j", "target_ref", "est_x", "est_y", "est_heading_deg",
                 "true_x", "true_y", "true_heading_deg", "world_x", "world_y", "drift", "heading_err_deg", "pose_source",
                 "map_source", "use_ok", "attack_ok", "exit_label_visible", "health", "damage_taken", "kills", "keys_picked",
                 "doors_opened", "locked_opened", "sectors_visited", "cells_visited", "exit_dist", "stuck_rate",
@@ -479,10 +488,10 @@ def _info_lines(f: dict) -> list[list]:
         value = tot.get(key, NAN)
         return f"{'-' if value is None or value != value else format(value, fmt):>{width}}"
 
-    target = f.get("target_text") or "-"
+    target = f.get("target_text") or "-"                  # at most 13 characters: "~(63,63)=self"
     line1 = [(f"step {f['step']:4d}/{f['steps_cap']:<4d} tic {f['tic']:4d}/{f['ticks']:<4d}", C_TEXT), sep,
              ("subgoal ", C_DIM), (f"{(f.get('subgoal') or '-')[:11]:<11}", C_HILITE), sep,
-             ("target ", C_DIM), (f"{target:<12}", C_TEXT)]
+             ("target ", C_DIM), (f"{target:<13}", C_TEXT)]
     if f.get("exit_believed") is not None:
         line1 += [sep, ("exit believed ", C_DIM), ("yes" if f["exit_believed"] else "no", C_GOOD if f["exit_believed"] else C_TEXT)]
 
@@ -974,6 +983,7 @@ class Recorder:
         self.row: dict | None = None
         self.odometry, self.memory = Odometry(), MemoryMap()
         self._exit_label = None
+        self._held = None               # (step, reported crop cell, crop origin) of a target reported without its origin
 
     # ---- helpers
     def warn(self, message: str) -> None:
@@ -1063,6 +1073,7 @@ class Recorder:
         st = env.privileged_state()
         self._start = (float(st["x"]), float(st["y"]), math.radians(float(st["angle"])))
         self.view = self._choose_view(meta, self._start)
+        self._held = None
         self.odometry.reset()
         self.memory.reset()
         visible = False
@@ -1145,6 +1156,27 @@ class Recorder:
         return {"debug": debug, "pose": pose, "pose_source": source, "crop": crop, "map_source": map_source,
                 "frame_pose": frame_pose, "exit_believed": believed, "acted": acted}
 
+    def _held_target(self, t: int, target: tuple[int, int], own: tuple[int, int]) -> tuple:
+        """(step, target, crop origin) for a crop cell that was reported without the origin of its crop.
+
+        A manager's target is an index into the crop of the step that chose it and is then held
+        while the crop moves on with the agent (PolicyNet chooses at the first step of an episode
+        and then every MANAGER_PERIOD steps). Read against the current crop, a held index would
+        slide along with the agent, by about one cell every two steps of walking. The viewer cannot
+        see when the choice was made, so it keeps the origin of the step at which the reported
+        index last changed or a manager period began, and takes the current one only then (or when
+        the previous step reported no such target). `own` is the origin of the current crop.
+        """
+        last = self._held
+        if last is not None and last[0] == t - 1 and last[1] == target and t % spec.MANAGER_PERIOD != 0:
+            origin = last[2]
+        else:
+            origin = own
+        self.warn("debug_state() gives 'target' as a crop index without 'target_origin' or 'target_cell': it is read against "
+                  f"the crop of the step where the index last changed or a manager period began (every {spec.MANAGER_PERIOD} "
+                  "steps) and marked '~'; this is a guess unless the choice is held on exactly that schedule")
+        return t, target, origin
+
     def _panel_state(self, t: int, action, snap: dict) -> dict:
         ps = self._policy_state(t)
         debug, pose, true = ps["debug"], ps["pose"], snap["true"]
@@ -1157,20 +1189,27 @@ class Recorder:
              "title": self.title, "acted": ps["acted"], "world": snap["world"],
              "error": self.probe.error or ("" if ps["acted"] else "the runner no longer calls this policy (agent error)"),
              "exit_visible": snap["exit_visible"], "target_ij": None, "target_text": None, "target_box": None}
-        # However the target is reported (a point, a start-frame cell, a cell of the crop centred on
-        # the agent or of an earlier crop given by its origin), it becomes a start-frame cell.
-        own, cell = crop_origin(pose), None
+        # However the target is reported (a point, a start-frame cell, a cell of a crop given by
+        # its origin, or a cell of a crop whose origin the viewer has to infer), it becomes a
+        # start-frame cell.
+        own, cell, ref, held = crop_origin(pose), None, "", None
         if debug["target_xy"] is not None:
             cell = (int(math.floor(debug["target_xy"][0] / CROP_CELL + 0.5)), int(math.floor(debug["target_xy"][1] / CROP_CELL + 0.5)))
+            ref = "xy"
         elif debug["target_cell"] is not None:
-            cell = (int(round(debug["target_cell"][0])), int(round(debug["target_cell"][1])))
+            cell, ref = (int(round(debug["target_cell"][0])), int(round(debug["target_cell"][1]))), "cell"
         elif debug["target"] is not None:
-            base = debug["target_origin"] or own
+            base, ref = debug["target_origin"], "origin"
+            if base is None:
+                held = self._held_target(t, debug["target"], own)
+                base, ref = held[2], "held"
             cell = (debug["target"][0] + int(round(base[0])), debug["target"][1] + int(round(base[1])))
+        self._held = held                                 # forgotten as soon as the policy reports the target otherwise
+        f["target_ref"] = ref
         shown = _MapFrame(ps["frame_pose"], self.view)
         if cell is not None:
             f["target_ij"] = (cell[0] - own[0], cell[1] - own[1])
-            f["target_text"] = f"({f['target_ij'][0]},{f['target_ij'][1]})"
+            f["target_text"] = f"{'~' if ref == 'held' else ''}({f['target_ij'][0]},{f['target_ij'][1]})"
             if f["target_ij"] == (CENTER, CENTER):
                 f["target_text"] += "=self"
             else:
@@ -1206,6 +1245,7 @@ class Recorder:
             "step": f["step"], "tic": f["tic"],
             "action": "".join(BUTTON_LETTERS[k] if action[k] else "." for k in range(spec.NUM_BUTTONS)) if action is not None else "",
             "acted": int(f["acted"]), "subgoal": f["subgoal"] or "", "target_i": target[0], "target_j": target[1],
+            "target_ref": f.get("target_ref", ""),
             "est_x": f"{est[0]:.2f}", "est_y": f"{est[1]:.2f}", "est_heading_deg": f"{_wrap_deg(math.degrees(est[2])):.2f}",
             "true_x": f"{true[0]:.2f}", "true_y": f"{true[1]:.2f}", "true_heading_deg": f"{_wrap_deg(math.degrees(true[2])):.2f}",
             "world_x": f"{f['world'][0]:.2f}", "world_y": f"{f['world'][1]:.2f}",

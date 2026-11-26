@@ -1,0 +1,21 @@
+{
+  "rollout": 64,
+  "workers": 3,
+  "envs_per_worker": 16,
+  "total_steps": 2000000,
+  "checkpoint_every": 10,
+  "stats_window": 200,
+  "head_bias": {},
+  "ppo": {
+    "int_coef": 0.3,
+    "epochs": 4,
+    "minibatch_chunks": 48,
+    "lr": 0.0007,
+    "target_kl": 0.03
+  },
+  "vec": {
+    "intrinsic": {
+      "enabled": true
+    }
+  }
+}

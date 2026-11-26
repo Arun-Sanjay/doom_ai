@@ -44,6 +44,9 @@ STOP_SLACK = 3.0              # allowed overshoot of a stop point when deciding 
 LINE_BAND = 16.0              # sideways error that is left alone: half of what one key step shifts the body by
 DRIFT_SPEED = 2.5             # sideways speed (units per tic) above which a body that is under way is braked
 DOOR_BACK = 24.0              # a door is opened from no further back than this from the middle of the cell before it
+DOOR_FRONT = 8.0              # ... and no further forward than this: a body that leans on the door while it rises
+                              # makes the pose estimate jump (measured: 9 units in one step)
+DOOR_REST = CELL / 2 + 12.0   # distance from the door face at which a body placed by the forward ray comes to rest
 BODY = 16.5                   # half-width kept free around the body (the body itself is 16): with LINE_BAND this
                               # leaves no sideways error that is neither corrected nor passable in a 64-unit corridor
 SAMPLE = 16.0                 # spacing of the samples of a swept segment
@@ -140,23 +143,29 @@ def hold_line(x, y, cos_t, sin_t, vx, vy, px, py, ax, ay) -> tuple[int, int]:
     return keys_for(pa * ax - pn * ay, pa * ay + pn * ax, cos_t, sin_t)
 
 
-def wait_at_door(x, y, cos_t, sin_t, vx, vy, px, py, gx, gy, creep: bool) -> tuple[int, int]:
+def wait_at_door(x, y, cos_t, sin_t, vx, vy, px, py, gx, gy, creep: bool, door_ahead: float | None = None) -> tuple[int, int]:
     """Move and strafe heads for waiting in the cell in front of a door.
 
     (px, py) is the centre of that cell and (gx, gy) the unit vector from it to the door. The
     body only has to be somewhere the door can be opened from and walked through: within
-    LINE_BAND of the door's axis and not further back than DOOR_BACK from the cell centre.
+    LINE_BAND of the door's axis, not further back than DOOR_BACK from the cell centre and not
+    further forward than DOOR_FRONT (clear of the door itself).
     Inside that zone it just comes to rest; outside it is brought back in. `creep` pushes it
     towards the door (a pickup lying between the body and the door hides the door from the ray
-    that has to reach it; a step forward puts the pickup behind).
+    that has to reach it; a step forward puts the pickup behind). `door_ahead` is the distance the
+    forward ray reads to the door face, given when it disagrees with the pose estimate: a body
+    that is inside the zone by its pose estimate is then brought to rest DOOR_REST from the face
+    the ray sees.
     """
     ex, ey = x - px, y - py
     along, lateral = ex * gx + ey * gy, -ex * gy + ey * gx
     v_along, v_lateral = vx * gx + vy * gy, -vx * gy + vy * gx
     if creep:
         pa = 1
-    elif along < -DOOR_BACK:
+    elif along < -DOOR_BACK or along > DOOR_FRONT:
         pa = axis_push(-along, v_along)
+    elif door_ahead is not None:
+        pa = axis_push(door_ahead - DOOR_REST, v_along)
     else:
         pa = axis_push(0.0, v_along)
     pn = axis_push(-lateral, v_lateral) if abs(lateral) > LINE_BAND else axis_push(0.0, v_lateral)

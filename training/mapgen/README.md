@@ -17,8 +17,8 @@ The agent is trained on procedural grid layouts. A layout is an ASCII grid with 
 | `solver.py` | `solve(grid)`: breadth-first search over (cell, keys held). Solvability and route cost. |
 | `layouts.py` | `generate(tier, seed)`: seeded layouts for tiers 0-4 with a tick cap and counts. |
 | `randomize.py` | `random_options(rng, grid)`: start pose, thing facing, ambush, light, textures, door delay. |
-| `walker.py` | Reference walker that follows the solver's route in the engine. Used by the tests only. |
-| `cli.py` | Training sets with a manifest, frozen suites, per-tier statistics. |
+| `walker.py` | Reference walker that follows the solver's route in the engine. Used by the tests and `--verify` only. |
+| `cli.py` | Training sets with a manifest, monster-free copies, frozen suites, per-tier statistics, engine check. |
 
 ## Compiler
 
@@ -56,7 +56,7 @@ Options, all off by default: `start_angle`, `start_offset`, `thing_angles`, `amb
 
 | Tier | Content |
 |---|---|
-| 0 navigation | Monster-free maps with an exit: corridors, rooms, doors, dead ends. Start of the curriculum. |
+| 0 navigation | Monster-free maps with an exit: corridors, rooms, doors, dead ends. One map in three also has one key and the locked door of its colour on the way to the exit. Start of the curriculum. |
 | 1 combat arena | Open rooms with cover and 2-12 monsters; about half have an exit. |
 | 2 exploration | Several rooms, corridors, doors and dead ends; light opposition. |
 | 3 keys and locks | One or two locked doors on the way to the exit; the door is usually met before its key. |
@@ -76,6 +76,23 @@ where the route cost model (2 steps per cell, 4 per corner, 20 per door) was fit
 walker in the engine. Drafts that fail are discarded and the next attempt of the same seed is used,
 so `generate(tier, seed)` is a pure function.
 
+Keys and locked doors without combat. The first stage of the curriculum has no monsters, and it
+should already teach "fetch the key, come back to the door". Whether tier 0 seed `s` is such a map
+depends on the seed alone (`layouts.has_key_stage`: every third seed); every draft of that seed
+must then place exactly one lock on a chokepoint of the route, with its key in the part of the map
+reachable before it. The other tier 0 seeds, and every seed of tiers 1 to 4, give the
+same map as before this was added. In the training set 100 of the 300 tier 0 maps have a key and a
+lock; the door is met before its key on 61 of them.
+
+Any map can also be written without its monsters: `--strip-monsters` (training sets, `--from-suite`
+and `--freeze`) turns every monster cell into floor and drops the ambush flags and monster facings,
+keeping walls, doors, keys, pickups, start pose, looks and tick cap. For example
+
+    python -m training.mapgen.cli --out data/maps/train_nav --n 300 --tiers 2,3,4 --seed 0 --randomize 0.5 --strip-monsters
+
+writes the tier 2 to 4 training maps as pure navigation tasks, under the same names in a directory
+of their own.
+
 ## Randomisation
 
 `--randomize P` builds a fraction P of the maps with random options: the player start is rotated
@@ -91,11 +108,15 @@ pad always keeps its floor.
 `style`, `exit_style`, `randomized`, `grid`, `options`, `counts`. `path` is written as given with
 `--out`, so it is relative to the directory the command ran in (the repository root).
 
-`training/suites/` holds the frozen evaluation suites as grids; see the README there.
+`training/suites/` holds the frozen evaluation suites as grids; see the README there. The training
+set is written with the command at the top of this file. `--stats FILE` prints its per-tier table
+and `--verify FILE --workers 3` loads every map in the engine and sends the reference walker to the
+exit on a monster-free copy.
 
 ## Checks
 
 `training/tests/test_mapgen.py` covers: byte identity and identical observations against the
 reference maps, every legend thing in the engine, lock colours, options, the solver, 50 maps per
 tier (structure, engine load, random play without warnings, reference walker to the exit within 60%
-of the tick cap) and the frozen suites.
+of the tick cap), the tier 0 key maps (one key, one locked door that the route needs, no monster,
+finished by the walker without a shot), monster-free copies, and the frozen suites.

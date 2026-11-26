@@ -586,6 +586,50 @@ def test_a_failing_agent_stands_still_and_is_still_scored():
         assert fine["agent_error"] == "" and fine["exit"] == 1     # the next map starts with a working agent
 
 
+class Leaky:
+    """Walks forward; in the episode with seed `seed` its third call raises and leaves it broken for good.
+
+    reset() does not repair it (the way half-updated internal state would not be): a broken one raises in every
+    call. `log` gets one line per policy built.
+    """
+
+    def __init__(self, seed=1, log=None):
+        self.bad_seed, self.current, self.t, self.broken = seed, None, 0, False
+        if log:
+            with open(log, "a") as f:
+                f.write("built\n")
+
+    def seed(self, seed):
+        self.current = seed
+
+    def reset(self):
+        self.t = 0
+
+    def act(self, obs):
+        self.t += 1
+        self.broken = self.broken or (self.t == 3 and self.current == self.bad_seed)
+        if self.broken:
+            raise RuntimeError("broken")
+        return np.array([1, 0, 0, 0, 0, 0, 0, 0, 0], np.int8)
+
+
+def test_an_agent_that_stopped_is_restarted_for_the_next_map(tmp_path):
+    """As in the evaluation: what an agent broke in one map does not reach the next one."""
+    maps = [{"wad": fixture_wad(EXIT), "episode_ticks": 200}]
+    for workers in (0, 1):
+        log = tmp_path / f"log{workers}"
+        rows = R.run_episodes((f"{__name__}:Leaky", {"log": str(log)}), maps, workers=workers, seeds=[0, 1, 2, 3],
+                              render_buffers=False)
+        assert [(r["exit"], r["agent_error"]) for r in rows] == [(1, ""), (0, "step 2: RuntimeError: broken"), (1, ""), (1, "")]
+        assert log.read_text().splitlines() == ["built", "built"]     # once at the start, once after the failure
+        alone = R.run_episodes((f"{__name__}:Leaky", {"log": str(log)}), maps, workers=0, seeds=[2], render_buffers=False)
+        assert strip_timing(rows[2:3]) == strip_timing(alone)          # the row does not depend on the earlier failure
+        assert log.read_text().splitlines() == ["built"] * 3
+    # a ready policy object cannot be built again: it only gets its reset()
+    rows = R.run_episodes(Leaky(), maps, workers=0, seeds=[0, 1, 2], render_buffers=False)
+    assert [(r["exit"], bool(r["agent_error"])) for r in rows] == [(1, False), (0, True), (0, True)]
+
+
 # ---- time limits
 FORWARD = np.array([1, 0, 0, 0, 0, 0, 0, 0, 0], np.int8)
 SHORT = {"wad": fixture_wad(EXIT), "episode_ticks": 60}      # 15 decision steps: a compute budget of 0.6 s

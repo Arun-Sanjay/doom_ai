@@ -32,8 +32,16 @@ ray that passes through a cell clears that cell's door bits, because rays only p
 that is open. Within one update the pass-through writes come first and the hits second, so a door
 that is closed now always ends the update marked. The bit therefore reads "closed door last seen
 here": it disappears when the door is seen open and comes back when it is seen closed again.
-Doors and walls vote against each other in a cell, so a hit that lands one cell to the side
-cannot turn a wall into a door.
+
+Three things keep a door bit off the wall cells next to a door. (1) A door ray takes the direction
+of its wall only from neighbouring rays that also ended on a door: a ray that ends on the corner
+between the door's face and a side wall is collinear with the side wall's points but belongs to
+the door. (2) The cell is found by two probe points that must agree (two points a little to either
+side along the face, or points along the ray where the face's direction is unknown); a hit so
+close to the edge of a cell that they disagree is skipped, since another ray or the next step
+marks the door anyway. (3) Doors and walls vote against each other in a cell, and the wall
+evidence is read before the door's vote: one door hit in a cell that holds wall evidence only
+weakens that evidence.
 
 Bounds: writes outside the arrays are dropped, `crop()` pads with zeros, and a pose that is far
 away or not finite never raises.
@@ -57,6 +65,8 @@ SAMPLE_STEP = 16.0            # units between free-space samples along a ray (ha
 FREE_MARGIN = 4.0             # free space stops this far in front of a wall (at right angles to it)
 HIT_PAST = 6.0                # the typed cell is the one this far behind the wall face (along its normal)
 HIT_PAST_RAY = 2.0            # ... or this far along the ray where the wall's direction is not known
+DOOR_EDGE = 1.0               # a door hit this close to the side edge of its cell is not used (direction known)
+DOOR_NEAR = 0.1               # probes this far before and behind a door hit whose direction is not known
 WALL_WEIGHT = 3               # evidence added by a wall hit (a pass-through removes 1)
 STAND_WEIGHT = 4              # evidence removed from the cell the agent stands in
 EXIT_GAIN = 0.5               # exit belief added per sighting, times the detector's confidence
@@ -147,7 +157,11 @@ class MemoryMap:
         static = (hit >= spec.HIT_WALL) & (hit <= spec.HIT_LOCKED)
         ux, uy = _COS_CELL[rows], _SIN_CELL[rows]                # ray directions, cells per unit
         px, py = ux * r, uy * r                                  # hit points relative to the agent, cells
-        nx, ny, known = wall_normals(px, py, static, COLLINEAR_TOL * INV_RES)
+        # A hit borrows the wall direction of a neighbouring ray only if that ray ended on the same
+        # kind of surface: a door ray that ends on the corner where the door's face meets a side wall
+        # is collinear with that wall's points, and with the wall's normal it would be typed into
+        # the wall's cell.
+        nx, ny, known = wall_normals(px, py, static, COLLINEAR_TOL * INV_RES, hit != spec.HIT_WALL)
         facing = (nx * ux + ny * uy) * spec.MAP_RES              # cosine between ray and wall normal
 
         # ---- free space: samples along every ray, stopping FREE_MARGIN short of the wall ------------
@@ -171,36 +185,51 @@ class MemoryMap:
             flags[idx] &= _NOT_DOOR                              # a ray passed through: the door is open
 
         # ---- hits: type the cell just behind the wall face ----------------------------------------
-        typed = np.flatnonzero(static)
-        if len(typed):
-            away = np.where(facing < 0.0, -HIT_PAST * INV_RES, HIT_PAST * INV_RES)
-            sx = np.where(known, nx * away, ux * HIT_PAST_RAY)
-            sy = np.where(known, ny * away, uy * HIT_PAST_RAY)
-            ix = np.floor(px[typed] + sx[typed] + cx).astype(np.intp)
-            iy = np.floor(py[typed] + sy[typed] + cy).astype(np.intp)
-            kind = hit[typed]
+        away = np.where(facing < 0.0, -HIT_PAST * INV_RES, HIT_PAST * INV_RES)
+        fx = px + cx + np.where(known, nx * away, ux * HIT_PAST_RAY)         # the point behind every hit,
+        fy = py + cy + np.where(known, ny * away, uy * HIT_PAST_RAY)         # array coordinates
+        k = np.flatnonzero(hit == spec.HIT_WALL)
+        if len(k):
+            ix, iy = np.floor(fx[k]).astype(np.intp), np.floor(fy[k]).astype(np.intp)
             if not inside:
                 ok = (ix >= 0) & (ix < N) & (iy >= 0) & (iy < N)
-                ix, iy, kind = ix[ok], iy[ok], kind[ok]
-            idx = ix * N + iy
-            is_wall = kind == spec.HIT_WALL
-            wall = idx[is_wall]
+                ix, iy = ix[ok], iy[ok]
+            wall = ix * N + iy
             v = occ[wall]
             v += WALL_WEIGHT
             v[v == 0] = WALL_WEIGHT
             occ[wall] = v
-            if self._doors or len(wall) < len(idx):
-                # Doors and walls vote against each other, so a hit that lands one cell to the side
-                # (the pose is an estimate) cannot turn a wall into a door or a door into a wall.
-                self._doors = True
-                flags[wall[v > 0]] &= _NOT_DOOR
-                door = idx[~is_wall]
-                v = occ[door]
-                v = np.where(v > 0, np.maximum(v - WALL_WEIGHT, 0), v)
-                occ[door] = v
-                agreed = v <= 0
-                bit = np.where(kind[~is_wall] == spec.HIT_DOOR, FLAG_DOOR, FLAG_LOCKED).astype(np.uint8)
-                flags[door[agreed]] |= bit[agreed]
+            if self._doors:
+                flags[wall[v > 0]] &= _NOT_DOOR                  # a wall seen here: not a door
+        k = np.flatnonzero(static & (hit != spec.HIT_WALL))
+        if len(k):
+            # A door is typed by two probe points that must fall in the same cell; otherwise the hit
+            # is too close to an edge of the door's cell to say which cell it belongs to, and it is
+            # skipped (another ray, or the next step, will mark the door).
+            # Wall direction known: the point behind the face, moved DOOR_EDGE to either side along
+            # the face. Not known: the points DOOR_NEAR and HIT_PAST along the ray; and the point
+            # DOOR_NEAR short of the hit may differ from the first of them along one axis only (the
+            # face lies between them), not along both (then the ray clipped the corner of a cell).
+            self._doors = True
+            kn = known[k]
+            ex, ey = ny[k] * (-DOOR_EDGE * INV_RES), nx[k] * (DOOR_EDGE * INV_RES)
+            hx, hy, rx, ry = px[k] + cx, py[k] + cy, ux[k], uy[k]
+            ix = np.floor(np.where(kn, fx[k] + ex, hx + rx * DOOR_NEAR)).astype(np.intp)
+            iy = np.floor(np.where(kn, fy[k] + ey, hy + ry * DOOR_NEAR)).astype(np.intp)
+            ok = ((ix == np.floor(np.where(kn, fx[k] - ex, hx + rx * HIT_PAST)))
+                  & (iy == np.floor(np.where(kn, fy[k] - ey, hy + ry * HIT_PAST)))
+                  & (kn | (ix == np.floor(hx - rx * DOOR_NEAR)) | (iy == np.floor(hy - ry * DOOR_NEAR))))
+            if not inside:
+                ok &= (ix >= 0) & (ix < N) & (iy >= 0) & (iy < N)
+            door = (ix * N + iy)[ok]
+            # Doors and walls vote against each other. The wall evidence is read before the vote: a
+            # door hit in a cell that holds wall evidence only weakens it, it takes a second look
+            # to turn the cell into a door.
+            v = occ[door]
+            agreed = v <= 0
+            occ[door] = np.where(agreed, v, np.maximum(v - WALL_WEIGHT, 0))
+            bit = np.where(hit[k][ok] == spec.HIT_DOOR, FLAG_DOOR, FLAG_LOCKED).astype(np.uint8)
+            flags[door[agreed]] |= bit[agreed]
 
         c, s = math.cos(theta), math.sin(theta)
         # ---- the agent's own cell ---------------------------------------------------------------------

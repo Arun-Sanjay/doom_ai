@@ -4,11 +4,14 @@ Training-time scaffolding. Never imported by the agent in submission/.
 
     python -m training.exitdet.train --tag v1 --save
 
-Targets. The visibility target of a frame is 1 when the label says the pad is visible and the
-renderer drew it (`data.drawn`: pad-coloured pixels where the pad must be). Frames the label marks
-ambiguous, and frames labelled visible in which nothing of the pad was drawn (too far for one pixel
-row, faded to black in a dark room, or below the frame), take no part in the visibility loss: the
-detector is never told that a pad it cannot see is there, nor that a pad it can partly see is not.
+Targets. The visibility target of a frame is 1 when the label says the pad is visible, the
+renderer drew it (`data.drawn`: pad-coloured pixels where the pad must be) and no monster or corpse
+stands in front of most of it (`data.clear`). Frames with a pad hidden in that way, frames the label marks
+ambiguous, frames labelled visible in which nothing of the pad was drawn (too far for one pixel
+row, faded to black in a dark room, or below the frame), and frames labelled "not visible" in which
+a patch of pad is plainly drawn at the edge of the view (`data.pad_at_edge`), take no part in the
+visibility loss: the detector is never told that a pad it cannot see is there, nor that a pad it
+can partly see is not.
 The position target (forward and left offset of the pad centre / 1024) is used on positive frames
 and, at half weight, on ambiguous frames in which the pad is drawn and its centre is in line of
 sight (a pad between 640 and 900 units, or one at the edge of the view), so that a detection on
@@ -20,13 +23,16 @@ brightness, contrast, gamma, saturation, hue, noise, slight blur). AdamW with a 
 cosine schedule; the weights that are kept are an exponential moving average of the trained ones.
 
 Decision threshold. The agent counts a sighting from confidence 0.5. After training the threshold
-that gives the wanted precision on the validation maps is found and folded into the bias of the
+that gives the wanted precision on maps not trained on (`val` and the calibration sets, among them
+frames from whole stretches of play) is found and folded into the bias of the
 visibility output, so that "sigmoid(logit) >= 0.5" is that operating point and nothing downstream
 needs to know a threshold.
 
 Outputs. runs/exitdet/TAG/: exit_detector.pt ({"state_dict", "config"}), train.csv (one row per
-epoch), table.csv and report.json (held-out evaluation). With --save the weights are also written
-to submission/weights/exit_detector.pt and the tables to training/logs/exit_detector*.
+epoch), table.csv and report.json (held-out evaluation), robustness.csv (the held-out set again
+under fixed colour changes, blur and noise). With --save the weights are also written to
+submission/weights/exit_detector.pt and the tables to training/logs/exit_detector*; a whole-episode
+table written into the run directory by `python -m training.exitdet.episodes --csv` goes with them.
 """
 
 from __future__ import annotations
@@ -48,7 +54,7 @@ from training import paths
 from doomnet.model import ExitDetector
 from training.exitdet import evaluate as ev
 from training.exitdet.augment import AugmentConfig, augment
-from training.exitdet.data import describe, drawn, load_set
+from training.exitdet.data import clear, describe, load_set, pad_at_edge
 
 RUNS = paths.ROOT / "runs" / "exitdet"
 LOGS = paths.ROOT / "training" / "logs"
@@ -87,8 +93,8 @@ def pick_device(name: str = "auto") -> str:
 def targets(data: dict) -> dict:
     """Per-frame training targets: visibility (1 / 0), whether the frame counts for the visibility
     loss, position / 1024 and its weight, and whether the frame shows a tagged hard negative."""
-    positive = drawn(data)
-    valid = positive | (~data["visible"] & ~data["ambiguous"])
+    positive = clear(data)
+    valid = positive | (~data["visible"] & ~data["ambiguous"] & ~pad_at_edge(data))
     fwd, left = data["pad_ego"][:, 0], data["pad_ego"][:, 1]
     edge = (data["ambiguous"] & data["pad_los"] & (data["pad_px"] >= AMBIGUOUS_MIN_PX) & (fwd > 16.0)
             & (np.abs(left) <= fwd * AMBIGUOUS_TAN) & (data["pad_dist"] <= AMBIGUOUS_RANGE))
@@ -177,8 +183,29 @@ def choose_threshold(logit: np.ndarray, data: dict, precision_target: float, min
             "recall_0_400": float(recall_near[k]), "detections": int(k + 1)}
 
 
+def load_train(data_dir, names, top: int, max_frames: int | None = None) -> dict:
+    """The training frames of one or more sets, joined. Map ids of later sets are shifted so they stay unique."""
+    dirs = [Path(data_dir) / name for name in names]
+    if len(dirs) == 1:
+        return load_set(dirs[0], top=top, max_frames=max_frames)
+    parts = [load_set(d, max_frames=max_frames, with_rgb=False) for d in dirs]
+    counts = [len(part["visible"]) for part in parts]
+    rgb = np.empty((sum(counts), 120 - top, 160, 3), np.uint8)       # read in place: the frames are never held twice
+    out, at, shift = {"maps": [], "rgb": rgb}, 0, 0
+    for d, part, n in zip(dirs, parts, counts):
+        load_set(d, top=top, max_frames=max_frames, into=rgb[at:at + n])
+        part["map_id"] = part["map_id"] + shift
+        shift += len(part["maps"])
+        out["maps"] += part["maps"]
+        at += n
+    for k in parts[0]:
+        if k != "maps":
+            out[k] = np.concatenate([part[k] for part in parts])
+    return out
+
+
 def train(cfg: TrainConfig, data_dir, out_dir, device: str = "auto", max_train_frames: int | None = None,
-          aug: AugmentConfig | None = None, log=print) -> dict:
+          aug: AugmentConfig | None = None, log=print, train_sets=("train",), calib_sets=("calib",)) -> dict:
     """Train, calibrate and save. Returns {"weights": path, "config": dict, "history": rows}."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -190,7 +217,7 @@ def train(cfg: TrainConfig, data_dir, out_dir, device: str = "auto", max_train_f
     gen = torch.Generator().manual_seed(cfg.seed)
 
     began = time.perf_counter()
-    train_set = load_set(Path(data_dir) / "train", top=top, max_frames=max_train_frames)
+    train_set = load_train(data_dir, train_sets, top, max_train_frames)
     val_set = load_set(Path(data_dir) / "val", top=top)
     stats = describe(train_set)
     log(f"learner device: {device}; train {stats['frames']} frames from {stats['maps']} maps "
@@ -257,9 +284,10 @@ def train(cfg: TrainConfig, data_dir, out_dir, device: str = "auto", max_train_f
         writer.writeheader()
         writer.writerows([{k: (round(v, 6) if isinstance(v, float) else v) for k, v in r.items()} for r in history])
 
-    # ---- decision threshold on maps not trained on (val, plus calib when collected), folded into the bias
+    # ---- decision threshold on maps not trained on (val, plus the calibration sets), folded into the bias
     ema_model.load_state_dict(shadow)
-    held = [val_set] + ([load_set(Path(data_dir) / "calib", top=top)] if (Path(data_dir) / "calib").is_dir() else [])
+    calib_sets = [name for name in calib_sets if any((Path(data_dir) / name).glob("shard_*.npz"))]
+    held = [val_set] + [load_set(Path(data_dir) / name, top=top) for name in calib_sets]
     logit = np.concatenate([ev.predict(ema_model, part["rgb"], top=top, device=device)[0] for part in held])
     merged = {k: np.concatenate([part[k] for part in held]) for k in ("visible", "ambiguous", "pos")}
     np.savez(out_dir / "threshold_scores.npz", logit=logit, **merged)
@@ -272,10 +300,10 @@ def train(cfg: TrainConfig, data_dir, out_dir, device: str = "auto", max_train_f
     config = {"arch": "doomnet.model.ExitDetector", "input": "rgb (B,3,120,160) uint8, or float in [0,1]",
               "rows_read": [top, 120], "outputs": ["visibility logit", "forward / 1024", "left / 1024"],
               "position_scale": ev.POS_SCALE, "sighting_from_confidence": 0.5,
-              "bias_shift_logit": -pick["threshold_logit"], "threshold_chosen_on": "val" + ("+calib" if len(held) > 1 else ""),
+              "bias_shift_logit": -pick["threshold_logit"], "threshold_chosen_on": "+".join(["val"] + list(calib_sets)),
               "threshold_frames": int(len(logit)),
               "val_precision_at_threshold": pick["precision"], "val_recall_0_400_at_threshold": pick["recall_0_400"],
-              "train_frames": int(n), "train_maps": stats["maps"], "label_max_range": 640.0,
+              "train_frames": int(n), "train_maps": stats["maps"], "train_sets": list(train_sets), "label_max_range": 640.0,
               "parameters": int(sum(p.numel() for p in model.parameters())),
               "train": asdict(cfg), "augment": {k: (list(v) if isinstance(v, tuple) else v) for k, v in asdict(aug).items()},
               "learner_device": device, "created": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -295,6 +323,10 @@ def report(weights, data_dir, out_dir, device: str = "auto", sets=("val", "heldo
     extra = {"stamp": time.strftime("%Y-%m-%d %H:%M:%S"), "weights_sha256": ev.file_sha256(weights)[:12],
              **{k: round(v, 4) for k, v in lat.items()}}
     ev.write_csv(rows, out_dir / "table.csv", extra)
+    again = [name for name in ("heldout", "heldout2") if name in sets]     # under fixed changes of the picture
+    if again:
+        ev.write_csv([row for name in again for row in ev.robustness(model, data_dir, name, pick_device(device))],
+                     out_dir / "robustness.csv", {"stamp": extra["stamp"], "weights_sha256": extra["weights_sha256"]})
     result = {"weights": str(weights), "weights_sha256": ev.file_sha256(weights), "config": config, "latency": lat,
               "gate": ev.gate([r for r in rows if r["set"] != "val"], lat), "rows": rows}
     (out_dir / "report.json").write_text(json.dumps(result, indent=1) + "\n")
@@ -308,7 +340,8 @@ def report(weights, data_dir, out_dir, device: str = "auto", sets=("val", "heldo
 
 
 def publish(run_dir, log=print) -> None:
-    """Copy a run's weights into submission/weights/ and its tables into training/logs/."""
+    """Copy a run's weights into submission/weights/ and its tables into training/logs/ (the
+    whole-episode table too, when `episodes.py` has written one into the run directory)."""
     run_dir = Path(run_dir)
     (paths.SUBMISSION / "weights").mkdir(parents=True, exist_ok=True)
     LOGS.mkdir(parents=True, exist_ok=True)
@@ -316,6 +349,10 @@ def publish(run_dir, log=print) -> None:
     shutil.copyfile(run_dir / "table.csv", LOGS / "exit_detector.csv")
     shutil.copyfile(run_dir / "train.csv", LOGS / "exit_detector_train.csv")
     shutil.copyfile(run_dir / "report.json", LOGS / "exit_detector.json")
+    if (run_dir / "robustness.csv").is_file():
+        shutil.copyfile(run_dir / "robustness.csv", LOGS / "exit_detector_robustness.csv")
+    if (run_dir / "episodes.csv").is_file():             # written by `python -m training.exitdet.episodes --csv`
+        shutil.copyfile(run_dir / "episodes.csv", LOGS / "exit_detector_episodes.csv")
     log(f"published {ev.WEIGHTS} (sha256 {ev.file_sha256(ev.WEIGHTS)[:12]}) and training/logs/exit_detector.csv")
 
 
@@ -324,8 +361,13 @@ def main(argv=None) -> int:
     ap.add_argument("--data", default=str(paths.ROOT / "data" / "exitdet"))
     ap.add_argument("--tag", default="run")
     ap.add_argument("--device", default="auto", help="auto = cuda, else mps, else cpu")
-    ap.add_argument("--max-train-frames", type=int, default=None)
+    ap.add_argument("--max-train-frames", type=int, default=None, help="per training set")
+    ap.add_argument("--train-sets", default="train,extra,play", help="comma-separated sets to train on (those that exist)")
+    ap.add_argument("--calib-sets", default="calib,play_calib", help="sets that, with val, the decision threshold is chosen on")
+    ap.add_argument("--report-sets", default="val,heldout,unseen,heldout2,unseen2,weapons,play_heldout,padflats",
+                    help="sets of the evaluation table (those that exist)")
     ap.add_argument("--save", action="store_true", help="publish the weights and tables after the evaluation")
+    ap.add_argument("--report-only", action="store_true", help="no training: evaluate the weights already in runs/exitdet/TAG")
     ap.add_argument("--threads", type=int, default=3)
     for name, default in asdict(TrainConfig()).items():
         ap.add_argument("--" + name.replace("_", "-"), type=type(default), default=default)
@@ -337,8 +379,14 @@ def main(argv=None) -> int:
     def log(*parts) -> None:
         print(*parts, flush=True)
 
-    result = train(cfg, args.data, run_dir, args.device, args.max_train_frames, log=log)
-    report(result["weights"], args.data, run_dir, args.device, log=log)
+    def present(names: str) -> list[str]:
+        return [n for n in names.split(",") if n and any((Path(args.data) / n).glob("shard_*.npz"))]
+
+    weights = run_dir / "exit_detector.pt"
+    if not args.report_only:
+        weights = train(cfg, args.data, run_dir, args.device, args.max_train_frames, log=log,
+                        train_sets=present(args.train_sets), calib_sets=present(args.calib_sets))["weights"]
+    report(weights, args.data, run_dir, args.device, sets=present(args.report_sets), log=log)
     if args.save:
         publish(run_dir, log=log)
     return 0

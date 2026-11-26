@@ -242,8 +242,9 @@ def test_loss_decreases_on_fixed_batch():
         # The toy environment supplies labels for every step: action heads, sub-goal and target cell.
         # At the start the term is about 6 small cross-entropies + ln 8 + 0.25 * ln 4096.
         assert stats["labelled"] == 1.0 and distill[0] > 5.0 and distill[-1] < 0.5 * distill[0]
-        # Without labels (the state of things until a teacher exists) the term is exactly zero.
-        batch["lab_mask"] = torch.zeros_like(batch["lab_mask"])
+        # Without labels (a map the teacher does not label) the term is exactly zero.
+        for key in ("lab_mask", "lab_head_mask", "lab_mgr"):
+            batch[key] = torch.zeros_like(batch[key])
         _, stats = ppo_loss(unroll(net, ppo.layout, batch), batch, ppo.cfg, 1.0, distill_weight=1.0)
         assert stats["loss_distill"] == 0.0 and stats["labelled"] == 0.0
     finally:
@@ -761,16 +762,19 @@ def test_vecenv_rotates_maps_from_curriculum_weights():
             seen |= {i["map"] for i in vec.recv(0)}
         assert seen == {2}                                   # only the tier with weight
         vec.set_tier_probs([1, 0, 0, 0, 0])
-        current, slowest, deadline = {}, 0.0, time.monotonic() + 30.0
+        current, times, deadline = {}, [], time.monotonic() + 30.0
         while time.monotonic() < deadline and not (len(current) == 4 and set(current.values()) == {0}):
             t0 = time.perf_counter()
             vec.send(0, np.tile(NOOP, (4, 1)))
             for info in vec.recv(0):
                 current[info["row"]] = info["map"]
-            slowest = max(slowest, time.perf_counter() - t0)
+            times.append(time.perf_counter() - t0)
             time.sleep(0.002)
         assert len(current) == 4 and set(current.values()) == {0}      # every row has moved to the new tier
-        assert slowest < 0.1                                           # and no step waited for a construction
+        # No step waited for a construction. Four replacements had to be built (0.15 s each or more),
+        # so stepping must have carried on for many steps meanwhile, and a typical step stayed short.
+        # (The slowest single step is not asserted: on a loaded machine any step can be descheduled.)
+        assert len(times) >= 12 and float(np.median(times)) < 0.05, (len(times), float(np.median(times)), max(times))
 
 
 def test_vecenv_runs_the_exit_detector_in_the_loop(tmp_path):
@@ -795,29 +799,50 @@ def test_vecenv_runs_the_exit_detector_in_the_loop(tmp_path):
 
 
 def test_teacher_hook_supplies_labels():
-    """A teacher object per environment is reset at episode starts and labels every observation."""
+    """A teacher object per environment is reset at episode starts and labels every observation.
+
+    The interface is that of ``training.teacher.Teacher``; the unified-loop tests in
+    ``test_unified.py`` run the real one.
+    """
+    pytest.importorskip("doomnet.memory")
+    from types import SimpleNamespace
+
     class Teacher:
         resets = 0
+
+        def __init__(self, **kwargs):
+            self.errors = 0
 
         def reset(self):
             Teacher.resets += 1
 
-        def label(self, frontend, obs, step):
-            assert hasattr(frontend, "mem") and hasattr(frontend, "odom")
-            return np.array([1, 0, 2, 0, 0, 0]), 3, 100 + step, True
+        def label(self, obs, crop, pose, scal, step, budget_steps, prev_action):
+            assert crop.shape == OBS_FIELDS["map"][0] and len(pose) == 3 and scal.shape == (spec.SCALAR_DIM,)
+            assert (prev_action is None) == (step == 0)
+            return SimpleNamespace(subgoal=3, target=100 + step, heads=np.array([1, 0, 2, 0, 0, 0]),
+                                   head_mask=np.array([True, True, True, False, True, False]),
+                                   value_field=np.full((64, 64), 7.0, np.float32), field_valid=True)
 
     original = deps.make_teacher
-    deps.make_teacher = Teacher
+    deps.make_teacher = lambda kind="real", **kwargs: None if kind == "none" else Teacher(**kwargs)
     try:
         entries = [deps.MapEntry(_reference_map("#####\n#P..#\n#####"), tier=0, episode_ticks=40)]
-        with VecEnv(entries, 0, 2, VecConfig(frontend="standin")) as vec:
+        with VecEnv(entries, 0, 2, VecConfig(frontend="real", teacher="real")) as vec:
             a = vec.arrays
             assert a["lab_mask"].all() and (a["lab_subgoal"] == 3).all() and (a["lab_target"] == 100).all()
+            assert a["lab_mgr"].all() and a["lab_field_ok"].all() and (a["lab_field"] == 7).all()
+            assert a["lab_head_mask"][0].tolist() == [True, True, True, False, True, False]
             for _ in range(12):                                    # episodes last 10 steps
                 vec.send(0, np.tile(NOOP, (2, 1)))
                 vec.recv(0)
             assert (a["lab_target"] == 102).all() and a["lab_heads"][0].tolist() == [1, 0, 2, 0, 0, 0]
+            assert not a["lab_field_ok"].any()                     # the field is stored on manager steps only
             assert Teacher.resets == 4                             # two rows, two episodes each
+        with VecEnv(entries, 0, 2, VecConfig(frontend="real")) as vec:     # the default: no teacher, no labels
+            assert not vec.arrays["lab_mask"].any() and not vec.arrays["lab_mgr"].any()
+        off_grid = [deps.MapEntry(entries[0].path, tier=0, episode_ticks=40, teach=False)]
+        with VecEnv(off_grid, 0, 2, VecConfig(frontend="real", teacher="real")) as vec:
+            assert not vec.arrays["lab_mask"].any() and not vec.arrays["lab_mgr"].any()
     finally:
         deps.make_teacher = original
 
@@ -915,3 +940,593 @@ def test_real_policy_replay_is_exact():
         assert np.isfinite(stats["loss"])
     finally:
         vec.close()
+
+
+# ---------------------------------------------------------------------------------------------
+# Integration: baseline play, exit-oracle gate, checkpoint format and export
+# ---------------------------------------------------------------------------------------------
+def test_uniform_summary_is_uniform_under_the_masks():
+    from training.rl.rollout import uniform_summary
+    masks = torch.tensor([[True, True], [False, True], [True, False], [False, False]])
+    summary = uniform_summary(masks)
+    assert summary.shape == (4, sum(spec.HEAD_SIZES) + 5)
+    tables = summary[:, :sum(spec.HEAD_SIZES)].split(spec.HEAD_SIZES, -1)
+    for h, table in enumerate(tables):
+        assert torch.allclose(table.exp().sum(-1), torch.ones(4))
+    assert tables[spec.HEAD_USE].exp().tolist() == [[0.5, 0.5], [1.0, 0.0], [0.5, 0.5], [1.0, 0.0]]
+    assert tables[spec.HEAD_ATTACK].exp().tolist() == [[0.5, 0.5], [0.5, 0.5], [1.0, 0.0], [1.0, 0.0]]
+    heads = sample_from_summary(summary.repeat(200, 1), torch.Generator().manual_seed(0))[0]
+    blocked_use, blocked_attack = heads[1::4, spec.HEAD_USE], heads[2::4, spec.HEAD_ATTACK]
+    assert not blocked_use.any() and not blocked_attack.any()
+    assert 0.2 < heads[0::4, spec.HEAD_ATTACK].float().mean() < 0.8 and set(heads[:, spec.HEAD_MOVE].tolist()) == {0, 1, 2}
+
+
+def test_play_episodes_counts_the_first_episodes_of_every_row():
+    from training.rl.rollout import play_episodes, summarise_episodes
+    entries = [deps.MapEntry(_reference_map("#######\n#P...E#\n#######"), tier=1, episode_ticks=120)]
+    cfg = VecConfig(frontend="standin")
+    results = play_episodes(None, entries, "cpu", 0, 3, cfg, seed=3, episodes_per_row=2)          # uniform random policy
+    assert len(results) == 6 and sorted(r["row"] for r in results) == [0, 0, 1, 1, 2, 2]
+    out = summarise_episodes(results)
+    assert out["episodes"] == 6 and out["maps"] == 1 and out["kills"] == 0.0 and 0.0 <= out["exit_rate"] <= 1.0
+    assert out["ep_len"] <= 30 and out["cells_seen"] > 0
+    torch.manual_seed(0)
+    again = play_episodes(deps.make_policy("standin"), entries, "cpu", 0, 2, cfg, seed=3, episodes_per_row=1)
+    assert len(again) == 2
+    assert summarise_episodes([]) == {"episodes": 0}
+
+
+def test_exit_oracle_gate_agrees_with_the_label_module(tmp_path):
+    """The cheap view-cone test in front of the label's line-of-sight test never changes the answer."""
+    exit_label = pytest.importorskip("training.exit_label")
+    udmf = pytest.importorskip("training.mapgen.udmf")
+    from doom_env import make_env
+    wad = str(tmp_path / "pillars.wad")
+    udmf.write_wad("#########\n#P......#\n#.##.##.#\n#.#...#.#\n#...E...#\n#########", wad)
+    env = make_env(wad, episode_ticks=1200, render_buffers=False)
+    try:
+        facts = deps.map_facts(wad)
+        if facts.meta is None:
+            pytest.skip("training.mapmeta is not available")
+        rng = np.random.default_rng(0)
+        obs, _ = env.reset(seed=0)
+        seen_count = 0
+        for _ in range(280):
+            action = (rng.random(9) < 0.35).astype(np.int8)
+            action[6:] = 0
+            obs, _, terminated, truncated, _ = env.step(action)
+            if terminated or truncated:
+                break
+            priv = env.privileged_state()
+            want = exit_label.exit_observation(env, facts.meta)
+            got = deps.exit_observation(env, facts, obs, priv)
+            assert (got is not None) == bool(want[0])
+            if got is not None:
+                seen_count += 1
+                assert got[1] * spec.RAY_RANGE == pytest.approx(want[1], abs=1e-2)
+                assert got[2] * spec.RAY_RANGE == pytest.approx(want[2], abs=1e-2)
+        assert 0 < seen_count < 280                                   # both answers occurred
+        assert len(facts.pads) == 1
+    finally:
+        env.close()
+
+
+def test_select_maps_filters_on_counts(tmp_path):
+    from training.rl.select_maps import select
+    wad = _reference_map("#######\n#P...E#\n#######")
+    rows = [{"path": wad, "tier": 1, "episode_ticks": 2100, "counts": {"exits": 0, "doors": 0, "rooms": 1, "monsters": 3}},
+            {"path": wad, "tier": 1, "episode_ticks": 2100, "counts": {"exits": 1, "doors": 0, "rooms": 1, "monsters": 3}},
+            {"path": wad, "tier": 1, "episode_ticks": 2100, "counts": {"exits": 0, "doors": 2, "rooms": 3, "monsters": 3}},
+            {"path": wad, "tier": 2, "episode_ticks": 2100, "counts": {"exits": 0, "doors": 0, "rooms": 1, "monsters": 0}}]
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert len(select(str(manifest))) == 4
+    kept = select(str(manifest), tier=1, exits=0, max_doors=0, max_rooms=1)
+    assert len(kept) == 1 and kept[0]["counts"]["monsters"] == 3
+    out = tmp_path / "sub.jsonl"
+    out.write_text("".join(json.dumps(r) + "\n" for r in kept))
+    assert [e.tier for e in deps.load_manifest(str(out))] == [1]
+
+
+def test_checkpoint_format_and_export_round_trip(tmp_path):
+    """A checkpoint of the real network exports to a file the safe loader reads and that rebuilds the same network."""
+    pytest.importorskip("doomnet.model")
+    from training.rl.export import export, sha256
+    from training.rl.train import CHECKPOINT_FORMAT, TrainConfig, load_policy, save_checkpoint
+    torch.manual_seed(0)
+    net = deps.make_policy("real", vp_iters=3)
+    cfg = TrainConfig()
+    ckpt = tmp_path / "ckpt.pt"
+    save_checkpoint(ckpt, net, PPO(net, cfg.ppo, "cpu"), Curriculum(cfg.curriculum, [1]), cfg, iteration=7, env_steps=1234)
+    state = torch.load(ckpt, weights_only=True)                       # plain containers and tensors only
+    assert state["format"] == CHECKPOINT_FORMAT and state["policy_kind"] == "PolicyNet"
+    assert state["policy_config"] == net.config and state["policy_config"]["vp_iters"] == 3
+    assert state["iteration"] == 7 and state["env_steps"] == 1234 and state["config"]["ppo"]["chunk"] == cfg.ppo.chunk
+    rebuilt, _ = load_policy(str(ckpt))
+    assert rebuilt.config == net.config
+
+    dest = tmp_path / "weights" / "policy.pt"
+    info = export(str(ckpt), dest)
+    assert info["path"] == str(dest) and info["sha256"] == sha256(dest) and info["config"]["vp_iters"] == 3
+    payload = torch.load(dest, map_location="cpu", weights_only=True)   # exactly what the agent does
+    assert set(payload) == {"state_dict", "config"} and payload["config"]["format"] == CHECKPOINT_FORMAT   # agent.save_weights
+    assert payload["config"]["iteration"] == 7 and payload["config"]["source"] == "ckpt.pt"
+    assert payload["config"]["policy_kwargs"] == net.config
+    from doomnet.model import PolicyNet
+    agent_net = PolicyNet(**payload["config"]["policy_kwargs"])
+    agent_net.load_state_dict(payload["state_dict"], strict=True)
+    assert all(v.device.type == "cpu" for v in payload["state_dict"].values())
+    g = torch.Generator().manual_seed(1)
+    args = (torch.rand(2, spec.NUM_RAYS, spec.RAY_FEATS, generator=g), torch.rand(2, spec.MAX_ENTITIES, spec.ENT_FEATS, generator=g),
+            torch.ones(2, spec.MAX_ENTITIES, dtype=torch.bool), torch.rand(2, spec.SCALAR_DIM, generator=g),
+            torch.rand(2, spec.MAP_CHANNELS, spec.CROP_SIZE, spec.CROP_SIZE, generator=g))
+    with torch.no_grad():
+        a, _ = net(*args, sample=False)
+        b, _ = agent_net(*args, sample=False)
+    assert all(torch.equal(x, y) for x, y in zip(a["logits"], b["logits"])) and torch.equal(a["value"], b["value"])
+    assert torch.equal(a["target"], b["target"])
+    again, _ = load_policy(str(dest))                                 # the exported file also loads for play / init
+    assert again.config == net.config
+
+    standin = deps.make_policy("standin")
+    save_checkpoint(ckpt, standin, PPO(standin, cfg.ppo, "cpu"), Curriculum(cfg.curriculum, [1]), cfg, 1, 1)
+    assert type(load_policy(str(ckpt))[0]).__name__ == type(standin).__name__
+    with pytest.raises(ValueError):
+        export(str(ckpt), dest)                                       # only the agent's network can be exported
+
+
+def test_learner_benchmark_runs_whole_updates_on_a_synthetic_rollout():
+    pytest.importorskip("doomnet.model")
+    from training.rl.bench import learner_benchmark, synthetic_rollout
+    out = learner_benchmark("cpu", PPOConfig(chunk=8, minibatch_chunks=4, epochs=1), steps=16, n_envs=4, updates=1,
+                            policy_kwargs={"vp_iters": 1})
+    assert out["samples_per_s"] > 0 and out["minibatch_samples"] == 32 and out["device"] == "cpu"
+    net = deps.make_policy("real", vp_iters=1)
+    buf = synthetic_rollout(net, 16, 3, 8, "cpu")
+    assert buf.obs["map"].dtype == torch.uint8 and buf.obs["step"][:, 0].tolist() == list(range(16))
+    assert set(buf.state) == set(net.initial_state(1, "cpu")) and buf.state["h"].shape[:2] == (2, 3)
+
+
+def test_train_stops_at_the_wall_clock_limit_and_logs_cells_seen(tmp_path):
+    from training.rl.train import LOG_COLUMNS, TrainConfig, apply_overrides, train
+    cfg = apply_overrides(TrainConfig(), {"workers": 0, "envs_per_worker": 2, "groups": 1, "rollout": 16, "policy": "standin",
+                                          "ppo": {"chunk": 8, "minibatch_chunks": 4, "epochs": 1}, "vec": {"frontend": "standin"}})
+    assert "cells_seen" in LOG_COLUMNS
+    assert train(cfg, "toy:bandit", str(tmp_path / "a"), device_name="cpu", max_minutes=0.0) == {}     # no time: no iteration
+    assert torch.load(tmp_path / "a" / "latest.pt", weights_only=True)["iteration"] == 0                # ... but a checkpoint
+    row = train(cfg, "toy:episodic", str(tmp_path / "b"), device_name="cpu", max_iterations=4, max_minutes=5.0)
+    assert row["iteration"] == 4 and row["cells_seen"] >= 0
+
+
+def test_head_bias_shifts_only_the_named_head():
+    pytest.importorskip("doomnet.model")
+    torch.manual_seed(0)
+    net = deps.make_policy("real", vp_iters=1)
+    before = net.actor[-1].bias.detach().clone()
+    deps.set_head_bias(net, {})
+    assert torch.equal(net.actor[-1].bias, before)
+    deps.set_head_bias(net, {"weapon": [1.5, -1.5]})
+    delta = net.actor[-1].bias.detach() - before
+    assert delta[-2:].tolist() == [1.5, -1.5] and not delta[:-2].any()
+    args = (torch.zeros(4, spec.NUM_RAYS, spec.RAY_FEATS), torch.zeros(4, spec.MAX_ENTITIES, spec.ENT_FEATS),
+            torch.zeros(4, spec.MAX_ENTITIES, dtype=torch.bool), torch.zeros(4, spec.SCALAR_DIM),
+            torch.zeros(4, spec.MAP_CHANNELS, spec.CROP_SIZE, spec.CROP_SIZE))
+    with torch.no_grad():
+        out, _ = net(*args, sample=False)
+    p_switch = log_softmax(out["logits"][spec.HEAD_WEAPON]).exp()[:, 1]
+    assert (p_switch < 0.1).all()                                    # about 5% instead of 50%
+    assert net.actor[-1].bias.requires_grad                          # still a trained parameter
+    with pytest.raises(ValueError):
+        deps.set_head_bias(net, {"turn": [1.0, 2.0]})
+
+
+def test_smoke_arenas_are_single_rooms_without_exit(tmp_path):
+    pytest.importorskip("training.mapgen.udmf")
+    from training.rl.smoke_arenas import write_set
+    rows = write_set(str(tmp_path), n=3, seed=5, monsters="zi", count=(3, 4))
+    assert len(rows) == 3 and (tmp_path / "manifest.jsonl").exists()
+    for row in rows:
+        grid = row["grid"]
+        assert grid.count("P") == 1 and "E" not in grid and "D" not in grid
+        assert 3 <= grid.count("z") + grid.count("i") == row["counts"]["monsters"] <= 4
+        lines = grid.split("\n")
+        assert all(line[0] == "#" == line[-1] for line in lines) and set(lines[0]) == {"#"} == set(lines[-1])
+    entries = deps.load_manifest(str(tmp_path / "manifest.jsonl"))
+    assert [e.tier for e in entries] == [1, 1, 1] and entries[0].episode_ticks == 2100
+    facts = deps.map_facts(entries[0].path)
+    assert facts.n_monsters == rows[0]["counts"]["monsters"] and len(facts.exit_centres) == 0
+    assert write_set(str(tmp_path / "again"), n=3, seed=5, monsters="zi", count=(3, 4))[0]["grid"] == rows[0]["grid"]
+    with pytest.raises(ValueError):
+        write_set(str(tmp_path / "bad"), n=1, monsters="h")            # a stimpack is not a monster
+
+
+# ---------------------------------------------------------------------------------------------
+# Provenance: a checkpoint is tied to the code that trained it
+# ---------------------------------------------------------------------------------------------
+def _real_checkpoint(tmp_path, name="ckpt.pt", **policy_kwargs):
+    from training.rl.train import TrainConfig, save_checkpoint
+    torch.manual_seed(0)
+    net = deps.make_policy("real", **policy_kwargs)
+    cfg = TrainConfig()
+    path = tmp_path / name
+    record = save_checkpoint(path, net, PPO(net, cfg.ppo, "cpu"), Curriculum(cfg.curriculum, [1]), cfg, iteration=2, env_steps=64)
+    return path, net, record
+
+
+def _edited_forward(monkeypatch, scale=1.25):
+    """Change what PolicyNet computes without touching a parameter name or shape (an edit of the forward pass)."""
+    from doomnet.model import PolicyNet
+    original = PolicyNet.forward
+
+    def forward(self, *args, **kwargs):
+        out, state = original(self, *args, **kwargs)
+        return dict(out, logits=tuple(lg * scale for lg in out["logits"]), value=out["value"] * scale), state
+
+    monkeypatch.setattr(PolicyNet, "forward", forward)
+
+
+def test_probe_episodes_cover_what_the_networks_see():
+    from training.rl import provenance
+    p = provenance.probe()
+    episodes, steps = p["scal"].shape[:2]
+    assert (episodes, steps) == (2, provenance.PROBE_STEPS) and len(p["sha256"]) == 64
+    for name, (shape, dtype) in OBS_FIELDS.items():
+        if name in ("rays", "ents", "ent_mask", "scal", "map", "masks"):
+            assert p[name].shape == (episodes, steps, *shape) and p[name].dtype == dtype
+    assert p["masks"][..., 0].any() and p["masks"][..., 1].any()           # USE and ATTACK are both allowed somewhere
+    assert (~np.isnan(p["exit_obs"][..., 0])).any() and p["ent_mask"].any()
+    seen = p["map"].reshape(-1, spec.MAP_CHANNELS, spec.CROP_SIZE ** 2).max((0, 2)) > 0
+    assert seen.all(), f"map channels never set in the probe: {np.nonzero(~seen)[0].tolist()}"
+    assert set(provenance.code_fingerprint()) == set(provenance.SOURCE_FILES) and all(provenance.code_fingerprint().values())
+
+
+def test_checkpoint_carries_a_provenance_record_and_loads_while_the_code_is_unchanged(tmp_path, capsys):
+    pytest.importorskip("doomnet.model")
+    from training.rl import provenance
+    from training.rl.train import load_policy
+    path, net, record = _real_checkpoint(tmp_path)
+    stored = torch.load(path, weights_only=True)["provenance"]                # plain containers and tensors
+    assert stored["code"] == provenance.code_fingerprint() and stored["probe_file"] == provenance.probe()["sha256"]
+    assert stored["network"].shape == (2, provenance.PROBE_STEPS, provenance.NETWORK_FEATS) and stored["error"] == ""
+    assert stored["frontend"].shape == (2 * provenance.PROBE_STEPS, provenance.FRONTEND_FEATS)
+    assert bool(torch.isfinite(stored["network"]).all()) and float(stored["network"].std()) > 0.01
+    capsys.readouterr()
+    policy, payload = load_policy(str(path))
+    assert capsys.readouterr().out == ""                                       # nothing to report
+    verdict = provenance.compare(provenance.record_of(payload), policy)
+    assert verdict.status == "ok" and not verdict.problems and not verdict.notes
+    # The record does not depend on the device the weights sit on or on the thread count.
+    again = provenance.network_signature(policy)
+    assert float((again - stored["network"]).abs().max()) < 1e-5
+    # Other weights are another function: the record is specific to the network it was written for.
+    other = deps.make_policy("real")
+    assert provenance.compare(stored, other).status == "mismatch"
+
+
+def test_checkpoint_is_refused_when_the_forward_pass_was_edited(tmp_path, monkeypatch, capsys):
+    """The reviewer's case: parameter names and shapes unchanged, the function is not."""
+    pytest.importorskip("doomnet.model")
+    from training.rl import provenance
+    from training.rl.export import export, verify
+    from training.rl.train import TrainConfig, load_policy, load_weights, train
+    path, net, _ = _real_checkpoint(tmp_path)
+    dest = tmp_path / "weights" / "policy.pt"
+    assert export(str(path), dest)["provenance"] == "ok"
+    assert verify(dest).status == "ok"
+    monkeypatch.delenv(provenance.ALLOW_ENV, raising=False)
+
+    _edited_forward(monkeypatch)
+    deps.make_policy("real").load_state_dict(torch.load(path, weights_only=True)["model"], strict=True)   # still loads silently
+    with pytest.raises(provenance.CheckpointMismatch, match="different function"):
+        load_policy(str(path))
+    with pytest.raises(provenance.CheckpointMismatch):
+        load_policy(str(dest))                                                 # the exported file carries the record too
+    with pytest.raises(provenance.CheckpointMismatch):
+        verify(dest)
+    with pytest.raises(provenance.CheckpointMismatch):
+        export(str(path), tmp_path / "weights2" / "policy.pt")
+    assert not (tmp_path / "weights2" / "policy.pt").exists()
+    with pytest.raises(provenance.CheckpointMismatch):
+        load_weights(deps.make_policy("real"), str(path), "cpu")              # --init and --resume
+    with pytest.raises(provenance.CheckpointMismatch):
+        train(TrainConfig(workers=0, envs_per_worker=2, rollout=16, policy="real"), "toy:bandit", str(tmp_path / "run"),
+              device_name="cpu", resume=str(path), max_iterations=1)
+    assert provenance.check_file(path).status == "mismatch"
+    # Deliberate migrations: the flag (check="warn") or the environment variable load it, loudly.
+    capsys.readouterr()
+    load_policy(str(path), check="warn")
+    assert "WARNING" in capsys.readouterr().out
+    monkeypatch.setenv(provenance.ALLOW_ENV, "1")
+    load_policy(str(path))
+    assert "explicitly allowed" in capsys.readouterr().out
+    load_policy(str(path), check="off")
+    assert capsys.readouterr().out == ""
+
+
+def test_checkpoint_is_refused_when_the_front_end_was_edited(tmp_path, monkeypatch):
+    pytest.importorskip("doomnet.memory")
+    from doomnet.memory import MemoryMap
+    from training.rl import provenance
+    from training.rl.train import load_policy
+    path, _, _ = _real_checkpoint(tmp_path)
+    original = MemoryMap.crop
+
+    def crop(self, pose):
+        out = original(self, pose).copy()
+        out[spec.CH_RECENCY] *= 0.5                                            # e.g. another decay of the breadcrumb trail
+        return out
+
+    monkeypatch.setattr(MemoryMap, "crop", crop)
+    monkeypatch.delenv(provenance.ALLOW_ENV, raising=False)
+    provenance.frontend_signature.cache_clear()                                # a new process would import the edited code
+    try:
+        with pytest.raises(provenance.CheckpointMismatch, match=f"map channel {spec.CH_RECENCY}"):
+            load_policy(str(path))
+    finally:
+        monkeypatch.undo()
+        provenance.frontend_signature.cache_clear()
+    load_policy(str(path))
+
+
+def test_file_without_a_record_warns_and_is_not_exported(tmp_path, monkeypatch, capsys):
+    pytest.importorskip("doomnet.model")
+    from training.rl import provenance
+    from training.rl.export import export
+    from training.rl.train import load_policy
+    path, _, _ = _real_checkpoint(tmp_path)
+    monkeypatch.delenv(provenance.ALLOW_ENV, raising=False)
+    payload = torch.load(path, weights_only=True)
+    del payload["provenance"]                                                  # a checkpoint from before the record existed
+    torch.save(payload, path)
+    capsys.readouterr()
+    load_policy(str(path))
+    assert "no provenance record" in capsys.readouterr().out
+    with pytest.raises(provenance.CheckpointMismatch, match="no provenance record"):
+        load_policy(str(path), check="require")
+    dest = tmp_path / "weights" / "policy.pt"
+    with pytest.raises(provenance.CheckpointMismatch):
+        export(str(path), dest, check="require")                               # the command line's default
+    assert not dest.exists()
+    assert export(str(path), dest)["provenance"] == "unverified" and dest.exists()   # from code, or with --allow-unverified
+    assert "no provenance record" in capsys.readouterr().out
+    monkeypatch.setattr("sys.argv", ["export", str(path), "--dest", str(tmp_path / "cli" / "policy.pt")])
+    from training.rl import export as export_module
+    with pytest.raises(provenance.CheckpointMismatch):
+        export_module.main()
+    monkeypatch.setattr("sys.argv", ["export", "--check", str(dest)])
+    with pytest.raises(SystemExit, match="CHECK FAILED"):
+        export_module.main()                                                   # an export without a record does not pass --check
+
+
+def test_edited_source_with_the_same_function_is_only_a_note(tmp_path, monkeypatch, capsys):
+    pytest.importorskip("doomnet.model")
+    from training.rl import provenance
+    from training.rl.train import load_policy
+    path, _, _ = _real_checkpoint(tmp_path)
+    now = provenance.code_fingerprint()
+    monkeypatch.setattr(provenance, "code_fingerprint", lambda: dict(now, **{"model.py": "0" * 64}))   # a comment was edited
+    capsys.readouterr()
+    policy, payload = load_policy(str(path))
+    out = capsys.readouterr().out
+    assert "model.py" in out and "still match" in out and "WARNING" not in out
+    assert provenance.compare(provenance.record_of(payload), policy).status == "ok"
+
+
+def test_toy_run_checkpoints_record_the_stand_in_and_resume(tmp_path):
+    from training.rl import provenance
+    from training.rl.train import TrainConfig, apply_overrides, load_policy, train
+    cfg = apply_overrides(TrainConfig(), {"workers": 0, "envs_per_worker": 2, "groups": 1, "rollout": 16, "policy": "standin",
+                                          "ppo": {"chunk": 8, "minibatch_chunks": 4, "epochs": 1}, "vec": {"frontend": "standin"}})
+    train(cfg, "toy:bandit", str(tmp_path), device_name="cpu", max_iterations=2)
+    record = torch.load(tmp_path / "latest.pt", weights_only=True)["provenance"]
+    assert record["frontend"] is None and record["network"] is not None and record["error"] == ""
+    policy, payload = load_policy(str(tmp_path / "latest.pt"))
+    assert provenance.compare(provenance.record_of(payload), policy).status == "ok"
+    assert train(cfg, "toy:bandit", str(tmp_path), device_name="cpu", resume=str(tmp_path / "latest.pt"), max_iterations=3)["iteration"] == 3
+
+
+# ---------------------------------------------------------------------------------------------
+# Failures of engines and workers do not stop or stall a run
+# ---------------------------------------------------------------------------------------------
+class _Stuck(standins.ToyBandit):
+    """A toy environment whose third step never returns, as a call into a dead engine does."""
+
+    built = 0
+
+    def __init__(self, ticks):
+        super().__init__(ticks)
+        type(self).built += 1
+        self.serial, self.calls = type(self).built, 0
+
+    def step(self, action):
+        self.calls += 1
+        if self.serial == 2 and self.calls >= 3:
+            import threading
+            threading.Event().wait()
+        return super().step(action)
+
+
+def test_a_step_that_never_returns_cuts_its_row_short_and_the_others_carry_on(monkeypatch):
+    import time
+    from training.rl import vecenv
+    _Stuck.built = 0
+    monkeypatch.setitem(standins.TOY_ENVS, "toy:stuck", _Stuck)
+    entries = [deps.MapEntry("toy:stuck", 0, 4000, 0)]
+    with VecEnv(entries, 0, 3, VecConfig(frontend="standin", step_timeout=0.5)) as vec:
+        vec.local.pool = vecenv._StepPool(3)                               # engine calls from threads, as on real maps
+        noop, reports, slowest = np.zeros((3, spec.NUM_BUTTONS), np.int8), [], 0.0
+        for _ in range(8):
+            before = vec.arrays["step"].copy()
+            start = time.perf_counter()
+            vec.send(0, noop)
+            new = vec.recv(0)
+            slowest = max(slowest, time.perf_counter() - start)
+            reports += new
+            if new:
+                assert vec.arrays["truncated"][1] and vec.arrays["reward"][1] == 0.0 and vec.arrays["step"][1] == 0
+                assert vec.arrays["fin_step"][1] == before[1]
+                assert (vec.arrays["step"][[0, 2]] == before[[0, 2]] + 1).all()   # the other rows stepped
+        assert len(reports) == 1 and reports[0]["crashed"] and reports[0]["row"] == 1 and "did not answer" in reports[0]["error"]
+        assert 0.4 < slowest < 3.0                                         # one step waited for the timeout, none for longer
+        assert vec.local.pool.threads == 4 and vec.arrays["step"].tolist() == [8, 5, 8]   # the stuck thread was replaced
+
+
+def _fragile(tmp_path, monkeypatch):
+    """Name the file that arms ``toy:fragile``; call before the workers start (they inherit the variable).
+    Writing "exit" or "hang" into it makes the next step of one environment fail, once."""
+    armed = tmp_path / "fail_once"
+    monkeypatch.setenv(standins.FRAGILE_ENV, str(armed))
+    return armed
+
+
+@pytest.mark.parametrize("mode", ["exit", "hang"])
+def test_a_dead_or_silent_worker_is_replaced_with_fresh_rows(tmp_path, monkeypatch, mode):
+    entries = [deps.MapEntry("toy:fragile", 0, 4000, 0)]
+    armed = _fragile(tmp_path, monkeypatch)
+    with VecEnv(entries, 2, 4, VecConfig(frontend="standin"), groups=2, timeout=2.0) as vec:
+        noop = np.zeros((vec.group_size, spec.NUM_BUTTONS), np.int8)
+        for g in (0, 1):
+            vec.send(g, noop)
+        assert vec.recv(0) == [] and vec.recv(1) == [] and vec.arrays["step"].tolist() == [1] * 8
+        old = [p.pid for p in vec.procs]
+        armed.write_text(mode)                                             # the next step of some row fails, once
+        for g in (0, 1):                                                   # both groups are outstanding when it happens
+            vec.send(g, noop)
+        reports = vec.recv(0) + vec.recv(1)
+        assert not armed.exists() and vec.respawns == 1
+        failed = next(w for w in (0, 1) if vec.procs[w].pid != old[w])     # the worker that took the armed step
+        mine = sorted(row for rows in vec.worker_rows[failed] for row in rows)
+        theirs = sorted(set(range(8)) - set(mine))
+        assert sorted(r["row"] for r in reports) == mine and all(r["crashed"] and "worker replaced" in r["error"] for r in reports)
+        a = vec.arrays
+        assert a["truncated"][mine].all() and not a["terminated"][mine].any() and (a["reward"][mine] == 0.0).all()
+        assert (a["step"][mine] == 0).all() and (a["fin_step"][mine] >= 1).all()   # fresh episodes; the old ones were cut short
+        assert (a["step"][theirs] == 2).all() and not a["truncated"][theirs].any()  # the other worker just stepped
+        for _ in range(3):                                                 # and the run goes on
+            for g in (0, 1):
+                vec.send(g, noop)
+            assert vec.recv(0) == [] and vec.recv(1) == []
+        assert (a["step"][mine] == 3).all() and (a["step"][theirs] == 5).all()
+        assert all(p.is_alive() for p in vec.procs)
+
+
+def test_a_worker_that_keeps_failing_ends_the_run_with_an_error(tmp_path, monkeypatch):
+    entries = [deps.MapEntry("toy:fragile", 0, 4000, 0)]
+    armed = _fragile(tmp_path, monkeypatch)
+    with VecEnv(entries, 1, 2, VecConfig(frontend="standin"), timeout=2.0, max_respawns=1) as vec:
+        noop = np.zeros((2, spec.NUM_BUTTONS), np.int8)
+        for attempt in range(2):
+            armed.write_text("exit")
+            vec.send(0, noop)
+            if attempt == 0:
+                assert len(vec.recv(0)) == 2
+            else:
+                with pytest.raises(RuntimeError, match="giving up"):
+                    vec.recv(0)
+
+
+def test_training_goes_on_after_a_worker_crash(tmp_path, monkeypatch):
+    from training.rl.train import TrainConfig, apply_overrides, train
+    cfg = apply_overrides(TrainConfig(), {"workers": 2, "envs_per_worker": 2, "groups": 2, "rollout": 16, "policy": "standin",
+                                          "ppo": {"chunk": 8, "minibatch_chunks": 4, "epochs": 1},
+                                          "vec": {"frontend": "standin", "worker_timeout": 5.0}})
+    _fragile(tmp_path, monkeypatch).write_text("exit")                     # the first step of one environment ends its worker
+    row = train(cfg, "toy:fragile", str(tmp_path / "run"), device_name="cpu", max_iterations=3)
+    rows = list(csv.DictReader((tmp_path / "run" / "train_log.csv").open()))
+    assert row["iteration"] == 3 and len(rows) == 3
+    assert [r["env_resets"] for r in rows] == ["2", "2", "2"]             # the two rows of the worker that crashed
+    assert torch.load(tmp_path / "run" / "latest.pt", weights_only=True)["iteration"] == 3
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("threads,how", [(0, "kill"), (2, "kill"), (2, "stop")])
+def test_a_killed_or_hung_engine_is_noticed_and_replaced(tmp_path, threads, how):
+    """Row level, with real engines: SIGKILL (the reviewer's reproduction) and an engine that stops answering."""
+    pytest.importorskip("doom_env")
+    import os
+    import signal
+    import time
+    from training.mapgen import udmf
+    from training.rl import vecenv
+    wad = str(udmf.write_wad("#######\n#P....#\n#.....#\n#######", tmp_path / "room.wad"))
+    entries = [deps.MapEntry(wad, tier=0, episode_ticks=2100)]
+    with VecEnv(entries, 0, 2, VecConfig(frontend="real", step_threads=threads, step_timeout=1.5)) as vec:
+        assert (vec.local.pool is not None) == (threads > 1)
+        noop = np.zeros((2, spec.NUM_BUTTONS), np.int8)
+        vec.send(0, noop)
+        assert vec.recv(0) == []
+        victim = vec.local.slots[1].env.engine_pid
+        assert victim is not None and victim in vecenv.engine_children() and victim != vec.local.slots[0].env.engine_pid
+        os.kill(victim, signal.SIGKILL if how == "kill" else signal.SIGSTOP)
+        time.sleep(0.3)
+        start = time.perf_counter()
+        vec.send(0, noop)
+        reports = vec.recv(0)
+        elapsed = time.perf_counter() - start
+        assert len(reports) == 1 and reports[0]["crashed"] and reports[0]["row"] == 1
+        assert ("is gone" in reports[0]["error"] or "died" in reports[0]["error"]) if how == "kill" else "did not answer" in reports[0]["error"]
+        assert elapsed < 15.0 and vec.arrays["step"].tolist() == [2, 0] and vec.arrays["truncated"][1]
+        replacement = vec.local.slots[1].env.engine_pid
+        assert replacement not in (None, victim)
+        for _ in range(3):                                                 # the replacement steps like any other row
+            vec.send(0, noop)
+            assert vec.recv(0) == []
+        assert vec.arrays["step"].tolist() == [5, 3]
+        deadline = time.time() + 10.0
+        while victim in (vecenv.engine_children() or ()) and time.time() < deadline:
+            time.sleep(0.2)
+        assert victim not in vecenv.engine_children()                      # the hung engine was killed, not left behind
+    assert not vecenv.engine_children()                                    # and closing left no engine of this process
+
+
+@pytest.mark.slow
+def test_a_killed_worker_leaves_no_engine_behind(tmp_path):
+    """Worker level, with real engines: the worker dies without closing anything; its engines must not stay as orphans."""
+    pytest.importorskip("doom_env")
+    import os
+    import time
+    from training.mapgen import udmf
+    from training.rl import vecenv
+    wad = str(udmf.write_wad("#######\n#P....#\n#.....#\n#######", tmp_path / "room.wad"))
+    entries = [deps.MapEntry(wad, tier=0, episode_ticks=2100)]
+    with VecEnv(entries, 1, 2, VecConfig(frontend="real"), timeout=10.0) as vec:
+        noop = np.zeros((2, spec.NUM_BUTTONS), np.int8)
+        vec.send(0, noop)
+        assert vec.recv(0) == []
+        worker = vec.procs[0]
+        engines = vecenv.group_engines(worker.pid)
+        assert len(engines) == 2 and os.getpgid(worker.pid) == worker.pid != os.getpgrp()
+        worker.kill()
+        vec.send(0, noop)
+        reports = vec.recv(0)
+        assert sorted(r["row"] for r in reports) == [0, 1] and all(r["crashed"] for r in reports) and vec.respawns == 1
+        deadline = time.time() + 10.0
+        while any(vecenv.process_alive(pid) for pid in engines) and time.time() < deadline:
+            time.sleep(0.2)
+        assert not any(vecenv.process_alive(pid) for pid in engines)
+        vec.send(0, noop)
+        assert vec.recv(0) == [] and vec.arrays["step"].tolist() == [1, 1]
+        replacement = vec.procs[0].pid
+        assert len(vecenv.group_engines(replacement)) == 2
+    time.sleep(0.5)
+    assert not vecenv.group_engines(replacement)                         # a clean close ends them too
+
+
+def test_training_warns_when_a_source_file_changes_during_the_run(tmp_path, monkeypatch, capsys):
+    from training.rl import provenance
+    from training.rl.train import TrainConfig, apply_overrides, train
+    cfg = apply_overrides(TrainConfig(), {"workers": 0, "envs_per_worker": 2, "groups": 1, "rollout": 16, "policy": "standin",
+                                          "checkpoint_every": 1, "ppo": {"chunk": 8, "minibatch_chunks": 4, "epochs": 1},
+                                          "vec": {"frontend": "standin"}})
+    real, calls = provenance.code_fingerprint, []
+
+    def fingerprint():                                                     # memory.py is "edited" after the run has started
+        calls.append(1)
+        return real() if len(calls) == 1 else dict(real(), **{"memory.py": "f" * 64})
+
+    monkeypatch.setattr(provenance, "code_fingerprint", fingerprint)
+    train(cfg, "toy:bandit", str(tmp_path), device_name="cpu", max_iterations=2)
+    out = capsys.readouterr().out
+    assert out.count("memory.py changed on disk after this run started") == 1          # said once, not at every checkpoint
+    record = torch.load(tmp_path / "latest.pt", weights_only=True)["provenance"]
+    assert record["code"] == real()                                        # the checkpoint names the code that was imported

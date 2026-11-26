@@ -10,7 +10,7 @@ Training-time scaffolding, never imported by the agent.
 | environments                  | ``doom_env.make_env``                     | ``training.rl.standins.TOY_ENVS``  |
 | map manifest                  | ``manifest.jsonl`` from the map generator | a ``toy:NAME`` string              |
 | exit observation (training)   | ``training.exit_label``                   | ``ray_exit_observation`` below     |
-| teacher labels                | wave 2 (``training.teacher``)             | the toy environments' own labels   |
+| teacher labels                | ``training.teacher.Teacher``              | the toy environments' own labels   |
 
 Every other file in ``training/rl`` goes through the functions below, so wiring in a real module
 (or changing how it is called) is a change to this file only. ``kind="auto"`` uses the real module
@@ -62,6 +62,8 @@ class FrontEnd:
     def __init__(self, kind: str = "auto"):
         odometry, memory, encoder, self.name = frontend_classes(kind)
         self.odom, self.mem, self.enc = odometry(), memory(), encoder()
+        self.odom_errors = 0            # odometry updates that raised (the pose estimate was kept), since construction
+        self.last_odom_error = ""
 
     def reset(self) -> None:
         self.odom.reset()
@@ -70,7 +72,11 @@ class FrontEnd:
 
     def observe(self, obs: dict, prev_action, step: int, budget_steps: float, exit_obs):
         if step > 0:
-            self.odom.update(prev_action, obs)
+            try:
+                self.odom.update(prev_action, obs)
+            except Exception as exc:                # noqa: BLE001 - one bad step must not end a training run:
+                self.odom_errors += 1               # keep the last pose estimate and carry on
+                self.last_odom_error = f"{type(exc).__name__}: {exc}"
         else:
             prev_action = None                      # the first observation of an episode has no action
         pose = (self.odom.x, self.odom.y, self.odom.theta)
@@ -96,6 +102,35 @@ def make_policy(kind: str = "auto", **kwargs):
                 raise
     from training.rl.standin_model import StandInPolicy
     return StandInPolicy(**kwargs)
+
+
+def set_head_bias(policy, biases: dict) -> None:
+    """Add a starting offset to the output biases of chosen controller heads.
+
+    biases: head name (``spec.HEAD_NAMES``) -> one offset per option of that head, for example
+    ``{"weapon": [1.5, -1.5]}``. The network's own initialisation makes every head near uniform,
+    so an untrained policy presses "next weapon" on half of all steps; the weapon is then almost
+    never ready to fire and shots that could earn reward are rare. An offset is only a starting
+    point: the bias stays an ordinary trained parameter. Applies to ``PolicyNet``, whose last actor
+    layer holds the six heads side by side; a network without that layer (the stand-in used by
+    the toy tests) is left unchanged.
+    """
+    actor = getattr(policy, "actor", None)
+    if not biases or actor is None:
+        return
+    import torch
+    from doomnet import spec
+
+    layer = actor[-1]
+    if getattr(layer, "out_features", None) != sum(spec.HEAD_SIZES):
+        raise ValueError("the policy's last actor layer does not hold the six controller heads")
+    offsets = np.cumsum((0,) + tuple(spec.HEAD_SIZES))
+    with torch.no_grad():
+        for name, values in biases.items():
+            head = spec.HEAD_NAMES.index(name)
+            if len(values) != spec.HEAD_SIZES[head]:
+                raise ValueError(f"head {name!r} has {spec.HEAD_SIZES[head]} options, got {len(values)} offsets")
+            layer.bias[offsets[head]:offsets[head + 1]] += torch.tensor(values, dtype=layer.bias.dtype, device=layer.bias.device)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -131,6 +166,10 @@ def _adapt_meta(meta) -> standins.BasicMeta:
 # ---------------------------------------------------------------------------------------------
 
 
+_RAY_ANGLES = np.arange(NUM_RAYS) * (2.0 * math.pi / NUM_RAYS)      # ray k points at angle k * 2 pi / 64, left positive
+_RAY_COS, _RAY_SIN = np.cos(_RAY_ANGLES), np.sin(_RAY_ANGLES)
+
+
 def ray_exit_observation(obs: dict, priv: dict, centres: np.ndarray, max_range: float):
     """Fallback exit observation from ground truth: (1, forward / 1024, left / 1024) or None.
 
@@ -150,10 +189,43 @@ def ray_exit_observation(obs: dict, priv: dict, centres: np.ndarray, max_range: 
             break
         if fwd[k] <= 0.0 or abs(left[k]) > fwd[k]:
             continue
-        ray = int(round(math.atan2(left[k], fwd[k]) / (2.0 * math.pi / NUM_RAYS))) % NUM_RAYS
+        ray = int(np.argmax(_RAY_COS * fwd[k] + _RAY_SIN * left[k]))      # the ray pointing most nearly at the pad
         if reach[ray] >= dist[k] - 16.0:
             return np.array([1.0, fwd[k] / RAY_RANGE, left[k] / RAY_RANGE], np.float32)
     return None
+
+
+_exit_label = None            # training.exit_label, imported on first use (False when it is missing)
+
+
+def _exit_label_module():
+    global _exit_label
+    if _exit_label is None:
+        try:
+            from training import exit_label
+            _exit_label = exit_label
+        except ImportError:
+            _exit_label = False
+    return _exit_label
+
+
+def _pad_may_be_visible(label, pads: np.ndarray, priv: dict) -> bool:
+    """Cheap necessary condition for ``exit_label.exit_observation`` to report a visible pad.
+
+    True when some pad centre is in front of the player, inside the label's view cone and range
+    (each with a small margin, so this never rejects a pad the label would accept). Most steps
+    fail it, and the label's line-of-sight test over the level geometry is then skipped.
+    """
+    heading = math.radians(priv["angle"])
+    c, s = math.cos(heading), math.sin(heading)
+    px, py = priv["x"], priv["y"]
+    far, near, tan = (label.MAX_RANGE + 1.0) ** 2, max(label.MIN_RANGE - 1.0, 0.0) ** 2, label.TAN_VISIBLE * 1.001
+    for ex, ey in pads:
+        dx, dy = ex - px, ey - py
+        fwd, left = dx * c + dy * s, dy * c - dx * s
+        if fwd > 0.0 and abs(left) <= fwd * tan + 1e-6 and near <= fwd * fwd + left * left <= far:
+            return True
+    return False
 
 
 def exit_observation(env, facts, obs: dict, priv: dict, rng=None, max_range: float = 640.0):
@@ -164,19 +236,34 @@ def exit_observation(env, facts, obs: dict, priv: dict, rng=None, max_range: flo
     ray-based fallback above. Training only: the agent gets these numbers from its detector network.
     """
     meta = getattr(facts, "meta", None)
-    if meta is not None and getattr(env, "_geometry", None) is not None:
-        try:
-            from training import exit_label
-        except ImportError:
-            exit_label = None
-        if exit_label is not None:
-            seen = exit_label.exit_observation(env, meta)[:3]
-            if rng is not None:
-                seen = exit_label.noisy(seen, rng)
-            if not seen[0]:
-                return None
-            return np.array([1.0, seen[1] / RAY_RANGE, seen[2] / RAY_RANGE], np.float32)
+    label = _exit_label_module() if (meta is not None and getattr(env, "_geometry", None) is not None) else False
+    if label:
+        pads = getattr(facts, "pads", None)
+        if pads is None:                                # centres of the exit pads, cached on the map's facts
+            pads = facts.pads = [tuple(map(float, e.centre)) for e in meta.exits if e.sector >= 0]
+        seen = (False, 0.0, 0.0)
+        if pads and "angle" in priv and _pad_may_be_visible(label, pads, priv):
+            seen = label.exit_observation(env, meta)[:3]
+        if rng is not None:
+            seen = label.noisy(seen, rng)
+        if not seen[0]:
+            return None
+        return np.array([1.0, seen[1] / RAY_RANGE, seen[2] / RAY_RANGE], np.float32)
     return ray_exit_observation(obs, priv, facts.exit_centres, max_range)
+
+
+def detector_state_dict(payload) -> dict:
+    """The state dict inside a loaded exit-detector file.
+
+    Accepted layouts: ``{"state_dict", "config"}`` (the committed ``submission/weights/exit_detector.pt``,
+    written by the agent's ``save_weights``), ``{"model": ...}`` (older training files) and a bare
+    state dict.
+    """
+    if isinstance(payload, dict):
+        for key in ("state_dict", "model"):
+            if isinstance(payload.get(key), dict):
+                return payload[key]
+    return payload
 
 
 def make_exit_detector(weights: str):
@@ -191,8 +278,11 @@ def make_exit_detector(weights: str):
 
     torch.set_num_threads(1)
     net = ExitDetector()
-    payload = torch.load(weights, map_location="cpu", weights_only=False)
-    net.load_state_dict(payload["model"] if isinstance(payload, dict) and "model" in payload else payload)
+    try:
+        payload = torch.load(weights, map_location="cpu", weights_only=True)
+    except Exception:                               # noqa: BLE001 - an older file that holds more than tensors
+        payload = torch.load(weights, map_location="cpu", weights_only=False)
+    net.load_state_dict(detector_state_dict(payload))
     net.eval()
 
     def detect(rgb) -> np.ndarray:
@@ -215,10 +305,30 @@ class MapEntry:
     tier: int = 0
     episode_ticks: int = 2100
     index: int = 0
+    teach: bool = True        # False: the navigation teacher gives no labels on this map (see start_on_grid)
 
     @property
     def is_toy(self) -> bool:
         return self.path.startswith("toy:")
+
+
+def start_on_grid(options) -> bool:
+    """True when a map's build options leave the player start on the 64-unit grid, facing along an axis.
+
+    The navigation teacher plans on the 64-unit cells of the agent's start frame. A start that is
+    moved inside its cell (``start_offset``) or turned by anything but a multiple of 90 degrees
+    (``start_angle``) puts the walls out of line with those cells and the teacher's labels become
+    wrong, so such maps are trained without labels.
+    """
+    options = options or {}
+    offset = options.get("start_offset")
+    if offset is not None and any(abs(float(v)) > 1e-6 for v in np.ravel(offset)):
+        return False
+    angle = options.get("start_angle")
+    if angle is None:
+        return True
+    quarter = float(angle) % 90.0
+    return min(quarter, 90.0 - quarter) < 1e-6
 
 
 def load_manifest(source: str, default_tier: int = 0, default_ticks: int = 2100) -> list[MapEntry]:
@@ -246,7 +356,8 @@ def load_manifest(source: str, default_tier: int = 0, default_ticks: int = 2100)
         if not raw.is_absolute():
             raw = next((base / raw for base in (p.parent, paths.ROOT, Path.cwd()) if (base / raw).exists()), p.parent / raw)
         entries.append(MapEntry(str(raw.resolve()), int(row.get("tier", default_tier)),
-                                int(row.get("episode_ticks", default_ticks)), len(entries)))
+                                int(row.get("episode_ticks", default_ticks)), len(entries),
+                                bool(row.get("teach", True)) and start_on_grid(row.get("options"))))
     if not entries:
         raise ValueError(f"no maps in {source}")
     return entries
@@ -273,24 +384,100 @@ def hit_count(env):
 
 
 # ---------------------------------------------------------------------------------------------
-# Teacher labels. Until a teacher exists only the toy environments provide labels, and the label
-# mask of every real step is zero.
+# Teacher labels: the navigation teacher of ``training.teacher`` on real maps, the toy
+# environments' own labels otherwise.
+# ---------------------------------------------------------------------------------------------
+N_HEADS = 6                                         # len(spec.HEAD_SIZES)
+FIELD_CAP = 255                                     # travel steps stored per cell: 255 = no route (the teacher's cap)
+_ALL_HEADS = np.ones(N_HEADS, bool)
+_NO_HEADS = np.zeros(N_HEADS, bool)
+
+
+def make_teacher(kind: str = "real", **kwargs):
+    """A navigation teacher for one environment, or None.
+
+    kind: "real" = ``training.teacher.Teacher(**kwargs)``; "auto" = the same when the module can be
+    imported, else None; "none" = no teacher. The teacher decides only from what the student network
+    receives: ``reset()`` at every episode start, then ``teacher_label`` below once per observation.
+    """
+    if kind == "none":
+        return None
+    try:
+        from training.teacher import Teacher
+    except ImportError:
+        if kind == "real":
+            raise
+        return None
+    return Teacher(**kwargs)
+
+
+def teacher_label(teacher, env, obs: dict, crop, pose, scal, step: int, budget_steps: float, prev_action):
+    """One step's labels, or None when there are none.
+
+    Returns (heads (6,), head_mask (6,) bool, sub-goal index, target cell index, manager_ok, field):
+
+    * ``head_mask`` says which controller heads carry a label. The navigation teacher never labels
+      attack and weapon, and labels no head at all while an enemy is visible (sub-goal "fight":
+      fighting is learned from reward alone).
+    * ``manager_ok``: the sub-goal and target are labels (False after an internal error of the teacher).
+    * ``field``: (64, 64) travel steps from every crop cell to the target, capped at ``FIELD_CAP``,
+      in the frame of the current crop; None when the teacher has no valid field.
+
+    The teacher is called with exactly what its interface specifies: the observation, the memory
+    crop and the pose estimate after the front end processed that observation, the encoder's scalar
+    vector, the step index, the assumed budget and the buttons actually executed on the previous
+    step (None at step 0). With no teacher, a toy environment's own ``teacher_label()`` is used.
+    """
+    if teacher is None:
+        own = getattr(env, "teacher_label", None)
+        if own is None:
+            return None
+        heads, subgoal, target, ok = own()
+        if not ok:
+            return None
+        return np.asarray(heads), _ALL_HEADS, int(subgoal), int(target), True, None
+    errors = getattr(teacher, "errors", 0)
+    label = teacher.label(obs, crop, pose, scal, step, budget_steps, prev_action)
+    if getattr(teacher, "errors", 0) != errors:     # the teacher caught an internal error: nothing to learn from
+        return None
+    head_mask = np.asarray(label.head_mask, bool)
+    return (np.asarray(label.heads), head_mask if head_mask.shape == (N_HEADS,) else _NO_HEADS, int(label.subgoal),
+            int(label.target), True, label.value_field if label.field_valid else None)
+
+
+# ---------------------------------------------------------------------------------------------
+# Forcing the manager's choice on some rows only
 # ---------------------------------------------------------------------------------------------
 
 
-def make_teacher():
-    """A teacher for one environment, or None while there is none.
+def enable_partial_forcing(policy) -> bool:
+    """Let ``forced`` entries of -1 mean "this row chooses for itself". Returns True when supported.
 
-    Expected interface: ``reset()`` at every episode start and
-    ``label(frontend, obs, step) -> (head labels (6,), sub-goal index, target cell index, mask)``,
-    reading only the agent's own memory (``frontend.mem``) and pose estimate (``frontend.odom``).
+    ``PolicyNet.forward(forced=...)`` replaces the manager's choice on every manager row of the
+    batch. The training loop forces the teacher's sub-goal and target on some rows (with
+    probability beta) and lets the others sample, in one forward pass. For that the network's
+    choice function is wrapped on this one object: rows whose forced value is negative keep the
+    network's own choice. Everything downstream (the value field and the controller) is then
+    conditioned on the choice in force, forced or not, exactly as in an unwrapped pass. A network
+    that handles -1 itself says so with a ``partial_forcing`` attribute; one with neither is left
+    alone and the collector falls back to two passes.
     """
-    return None
+    if getattr(policy, "partial_forcing", False):
+        return True
+    inner = getattr(policy, "_choose", None)
+    if inner is None:
+        return False
+    import torch
 
+    def choose(logits, forced, sample):
+        if forced is None:
+            return inner(logits, None, sample)
+        forced = forced.long()
+        keep = forced >= 0
+        if bool(keep.all()):
+            return forced
+        return torch.where(keep, forced, inner(logits, None, sample))
 
-def teacher_label(teacher, env, frontend: FrontEnd, obs: dict, step: int):
-    """(head labels (6,), sub-goal index, target cell index, mask) or None when there is no label."""
-    if teacher is not None:
-        return teacher.label(frontend, obs, step)
-    label = getattr(env, "teacher_label", None)
-    return label() if label is not None else None
+    policy._choose = choose
+    policy.partial_forcing = True
+    return True

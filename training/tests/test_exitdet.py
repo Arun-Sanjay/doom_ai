@@ -21,6 +21,7 @@ from training.exit_label import exit_observation
 from training.exitdet import augment as A
 from training.exitdet import collect as C
 from training.exitdet import data as D
+from training.exitdet import episodes as P
 from training.exitdet import evaluate as E
 from training.exitdet import textures as X
 from training.exitdet import train as T
@@ -142,7 +143,8 @@ def test_add_distractors_gives_a_grid_that_compiles():
 
 # ---- planning ------------------------------------------------------------------------------------------
 def test_plan_is_deterministic_and_sets_share_no_layout():
-    sizes = {"unseen": 20, "heldout": 20, "val": 20, "train": 40, "calib": 20}
+    sizes = {"unseen": 20, "heldout": 20, "val": 20, "train": 40, "calib": 20, "weapons": 20, "extra": 20,
+             "play_heldout": 20, "play_calib": 20, "play": 20, "play2": 20}
     plans = C.plan(sizes)
     assert plans == C.plan(sizes)
     assert {k: len(v) for k, v in plans.items()} == sizes
@@ -243,6 +245,44 @@ def test_targets_ignore_ambiguous_frames_and_pads_that_were_not_drawn():
     assert (t["pos"][[2, 4, 5]] == 0).all()
 
 
+def test_a_pad_hidden_behind_a_monster_or_a_corpse_is_no_target():
+    f = toy_set()
+    f["pad_cover"][:2] = [D.COVER_MAX, D.COVER_MAX - 1]         # the near pad is hidden, the far one is not
+    assert D.clear(f).tolist() == [False, True, False, False, False, False]
+    t = T.targets(f)
+    assert t["y"].tolist() == [0, 1, 0, 0, 0, 0] and t["valid"].tolist() == [0, 1, 0, 0, 1, 1] and t["pos_w"][0] == 0
+    logit = np.array([-5.0, 5.0, -5.0, -5.0, -5.0, -5.0])
+    m = E.detection_metrics(f, logit, np.zeros((6, 2), np.float32))
+    assert m["recall_0_200"] == 0.0 and m["n_drawn_0_200"] == 1 and m["n_clear_0_200"] == 0     # a miss by the label, not a clear view
+    assert m["recall_clear_200_400"] == 1.0 and m["recall_clear_0_400"] == 1.0 and m["recall_0_400"] == 0.5
+
+
+def test_pad_cover_sees_a_monster_and_its_corpse_in_front_of_the_pad(tmp_path):
+    ahead = HALL.replace("#P" + "." * 10 + "E#", "#P.......z..E#")           # a zombie on the line to the pad
+    aside = HALL.replace("#" + "." * 12 + "#\n#P", "#" + "." * 9 + "z..#\n#P", 1)     # a zombie one row off that line
+    covers = {}
+    for name, grid in (("ahead", ahead), ("aside", aside)):
+        wad = udmf.write_wad(grid, tmp_path / f"{name}.wad")
+        meta = load_meta(wad)
+        env = make_env(str(wad), episode_ticks=2100)
+        try:
+            env.reset(seed=0)
+            scene = C.Scene(env, meta, job(grid, tmp_path))
+            look(env, 352, PAD_Y, steps=1)
+            alive = scene.pad_cover(env.privileged_state(), scene.pads[0])
+            env._game.send_game_command("kill monsters")
+            for _ in range(12):
+                obs, *_ = env.step(np.zeros(9, np.int8))
+            st = env.privileged_state()
+            covers[name] = (alive, scene.pad_cover(st, scene.pads[0]), scene.pad_pixels(st, obs["rgb"]), exit_observation(env, meta)[0])
+        finally:
+            env.close()
+    alive, dead, pixels, visible = covers["ahead"]
+    assert visible and alive >= 80 and dead >= D.COVER_MAX      # the label still calls the pad visible
+    assert pixels > 2 * covers["aside"][2]                      # and the corpse's red passes for pad pixels
+    assert covers["aside"][:2] == (0, 0) and covers["aside"][3]
+
+
 def test_loss_ignores_frames_without_a_target():
     t = {k: torch.from_numpy(v) for k, v in T.targets(toy_set()).items()}
     cfg = T.TrainConfig()
@@ -335,6 +375,35 @@ def test_detection_metrics_on_a_hand_made_set():
     assert half["negative"] == 0 and half["false_positives"] == 0 and half["precision"] == 1.0
 
 
+def test_perturbations_keep_the_frame_shape_and_none_is_the_identity(tmp_path):
+    x = A.plain(frames(3))
+    changes = E.perturbations()
+    assert len(changes) >= 15 and torch.equal(changes["none"](x), x)
+    for name, change in changes.items():
+        y = change(x)
+        assert y.shape == x.shape and torch.isfinite(y).all(), name
+        if name != "none":
+            assert (y - x).abs().mean() > 1e-3, name
+    grey = torch.full((1, 3, 4, 4), 0.5)
+    assert torch.allclose(changes["hue +0.08 turn"](grey), grey, atol=1e-3)          # a hue turn leaves grey alone
+    assert changes["red x0.8"](grey)[0, 0].max() < 0.41 and changes["red x0.8"](grey)[0, 1].min() == 0.5
+    # the table: one row per change, and the unchanged row equals the plain evaluation
+    rng = np.random.default_rng(0)
+    writer = D.ShardWriter(tmp_path / "tiny")
+    f = D.empty_fields(12)
+    f["visible"][:6] = True
+    f["pos"][:6] = (150.0, 10.0)
+    f["pad_px"][:6] = 200
+    writer.add(rng.integers(0, 256, (12, 120, 160, 3), dtype=np.uint8), f)
+    writer.close()
+    torch.manual_seed(0)
+    det = ExitDetector().eval()
+    rows = E.robustness(det, tmp_path, "tiny")
+    assert [r["perturbation"] for r in rows] == list(changes) and all(r["frames"] == 12 for r in rows)
+    plain = E.evaluate_sets(det, tmp_path, ["tiny"])[0]
+    assert rows[0]["false_positives"] == plain["false_positives"] and rows[0]["recall_0_200"] == pytest.approx(plain["recall_0_200"], nan_ok=True)
+
+
 def test_latency_is_measured_on_one_thread_and_restores_the_setting():
     before = torch.get_num_threads()
     lat = E.latency(ExitDetector(), frames=60, warmup=10)
@@ -366,6 +435,91 @@ def test_shard_writer_round_trip(tmp_path):
     assert D.describe(back)["frames"] == 13
 
 
+def test_load_set_fills_fields_an_older_shard_does_not_have(tmp_path):
+    """The first sets were written before pad_ego, pad_los and weapon existed."""
+    f = D.empty_fields(4)
+    f["visible"][:] = [1, 0, 0, 1]
+    f["ambiguous"][:] = [0, 1, 0, 0]
+    f["pos"][:] = [(120, 10), (0, 0), (0, 0), (300, -40)]
+    f["pad_px"][:] = [200, 5, 0, 30]
+    (tmp_path / "old").mkdir()
+    np.save(tmp_path / "old" / "shard_000.npy", np.zeros((4, 120, 160, 3), np.uint8))
+    np.savez(tmp_path / "old" / "shard_000.npz",
+             **{k: v for k, v in f.items() if k not in ("pad_ego", "pad_los", "weapon", "pad_cover")})
+    back = D.load_set(tmp_path / "old", top=48)
+    assert set(D.FIELDS) <= set(back) and all(back[k].dtype == dt for k, dt in D.FIELDS.items())
+    assert np.array_equal(back["pad_ego"], f["pos"]) and back["pad_los"].tolist() == [True, False, False, True]
+    assert (back["weapon"] == 0).all() and (back["pad_cover"] == 0).all()
+    t = T.targets(back)
+    assert t["y"].tolist() == [1, 0, 0, 1] and t["valid"].tolist() == [1, 0, 1, 1] and t["pos_w"].tolist() == [1, 0, 0, 1]
+
+
+def test_load_train_joins_sets_and_keeps_map_ids_apart(tmp_path):
+    for name, n_maps in (("a", 2), ("b", 3)):
+        writer = D.ShardWriter(tmp_path / name)
+        f = D.empty_fields(5)
+        f["map_id"][:] = np.arange(5) % n_maps
+        f["weapon"][:] = 2 if name == "a" else 3
+        writer.add(np.full((5, 120, 160, 3), 7 if name == "a" else 9, np.uint8), f)
+        writer.close()
+        (tmp_path / name / "maps.jsonl").write_text("".join(json.dumps({"name": f"{name}{i}", "look": "random"}) + "\n"
+                                                              for i in range(n_maps)))
+    both = T.load_train(tmp_path, ["a", "b"], top=48)
+    assert both["rgb"].shape == (10, 72, 160, 3) and both["rgb"][:5].max() == 7 and both["rgb"][5:].min() == 9
+    assert both["map_id"].tolist() == [0, 1, 0, 1, 0, 2, 3, 4, 2, 3] and [m["name"] for m in both["maps"]] == ["a0", "a1", "b0", "b1", "b2"]
+    assert D.describe(both)["maps"] == 5
+    picks = E.subsets(both)
+    assert set(picks) == {"all", "random look", "holding pistol", "holding shotgun"} and picks["holding shotgun"].sum() == 5
+    assert len(T.load_train(tmp_path, ["a"], top=48)["visible"]) == 5
+
+
+# ---- whole episodes ------------------------------------------------------------------------------------
+def toy_episode() -> dict:
+    """Standing at (96, 160) looking east at a pad whose centre is 320 units ahead, in cell (6, 2)."""
+    n = 8
+    ep = {"logit": np.full(n, -6.0), "pred": np.zeros((n, 2)), "visible": np.ones(n, bool), "ambiguous": np.zeros(n, bool),
+          "pos": np.tile([320.0, 0.0], (n, 1)), "tags": np.zeros(n, np.uint32),
+          "pose": np.tile([96.0, 160.0, 0.0], (n, 1)), "pads": np.array([[416.0, 160.0]]), "tier": 2, "name": "toy"}
+    return ep
+
+
+def test_exit_map_counts_found_pads_and_false_cells():
+    ep = toy_episode()
+    quiet = P.exit_map(ep)
+    assert quiet["pad_in_view"] and not quiet["found"] and quiet["sightings"] == 0 and quiet["steps_to_find"] == -1
+    ep["logit"][2:5] = 8.0
+    ep["pred"][2:5] = [(318.0, 6.0), (330.0, -4.0), (300.0, 0.0)]
+    hit = P.exit_map(ep)
+    assert hit["found"] and hit["exact"] and hit["steps_to_find"] == 2 and hit["sightings"] == 3 and hit["false_cells"] == 0
+    ep["pose"][6] = (96.0, 160.0, math.pi / 2)                  # looking north: a sighting 320 ahead is far from the pad
+    ep["visible"][6] = False
+    ep["logit"][6], ep["pred"][6] = 8.0, (320.0, 0.0)
+    one = P.exit_map(ep)
+    assert one["found"] and one["false_cells"] == 1 and one["false_strong"] == 0     # one sighting: belief just under 0.5
+    ep["logit"][7], ep["pred"][7], ep["pose"][7], ep["visible"][7] = 8.0, (320.0, 0.0), (96.0, 160.0, math.pi / 2), False
+    assert P.exit_map(ep)["false_strong"] == 1
+    rows = P.summarise([ep, toy_episode()])
+    assert [r["subset"] for r in rows] == ["all", "tier 2"] and rows[0]["episodes"] == 2
+    assert rows[0]["episodes_pad_in_view"] == 2 and rows[0]["episodes_found"] == 1 and rows[0]["false_positives"] == 2
+    assert rows[0]["recall_0_400"] == pytest.approx(3 / 14) and rows[0]["precision"] == pytest.approx(3 / 5)
+
+
+def test_play_runs_the_detector_on_every_frame_of_an_episode(tmp_path):
+    torch.manual_seed(0)
+    weights = tmp_path / "det.pt"
+    torch.save({"state_dict": ExitDetector().state_dict(), "config": {}}, str(weights))
+    ep = P.play({"name": "hall", "tier": 0, "grid": HALL, "options": {}, "episode_ticks": 400, "seed": 3,
+                 "weights": str(weights), "wad": str(tmp_path / "hall.wad")})
+    assert ep["error"] == "", ep["error"]
+    n = len(ep["logit"])
+    assert 20 <= n <= 102 and all(len(ep[k]) == n for k in ("pred", "visible", "ambiguous", "pos", "tags", "pose"))
+    assert ep["ambiguous"][0] and not ep["visible"][0]          # the start faces the pad from 704 units: beyond the label's range
+    assert ep["pose"][0] == pytest.approx((96.0, PAD_Y, 0.0), abs=1.0)
+    assert np.allclose(ep["pads"], [[PAD_X, PAD_Y]])
+    P.exit_map(ep)
+    assert P.summarise([ep])[0]["frames"] == n
+
+
 # ---- collection in the engine --------------------------------------------------------------------------
 def test_collect_map_gives_labelled_frames_and_is_deterministic(tmp_path):
     grid = HALL.replace("#P" + "." * 10, "#P...r" + "." * 6)    # a red key on the way to the pad
@@ -390,6 +544,75 @@ def test_collect_map_gives_labelled_frames_and_is_deterministic(tmp_path):
     assert np.array_equal(again["rgb"], rgb) and all(np.array_equal(again["fields"][k], f[k]) for k in D.FIELDS)
     other = C.collect_map(job(grid, tmp_path, frames=40, seed=8))
     assert not np.array_equal(other["rgb"], rgb)
+
+
+ARENA = "\n".join(["#" * 12, "#P....z...E#", "#.....z....#", "#..z.....z.#", "#....z.....#", "#" * 12])
+
+
+def test_play_recipe_plays_from_the_start_and_sees_what_a_fight_leaves(tmp_path):
+    """The `play` recipe: stretches of play from the map's own start, and teleported views with the monsters dead."""
+    result = C.collect_map({**job(ARENA, tmp_path, name="arena", frames=64, seed=5), "recipe": "play"})
+    assert result["error"] == "", result["error"]
+    f = result["fields"]
+    kinds = np.bincount(f["kind"], minlength=len(D.KINDS))
+    assert kinds[D.KIND_INDEX["play"]] >= 10 and kinds.sum() == 64 and result["mined"] == 0
+    assert kinds[D.KIND_INDEX["approach"]] == 0 and kinds[D.KIND_INDEX["spin"]] == 0       # not part of this recipe
+    assert D.has_tag(f["tags"], "blood").sum() >= 5            # corpses and blood: the engine files both under gore
+    assert D.has_tag(f["tags"], "monster").any() and D.has_tag(f["tags"], "firing").any()
+    assert not (f["visible"] & f["ambiguous"]).any()
+
+
+def test_hunt_turns_on_a_monster_and_fires_when_it_is_ahead():
+    def obs(sin_a: float, cos_a: float, kind: int = 2) -> dict:
+        feats = np.zeros((32, 5), np.float32)
+        feats[0] = (0.2, sin_a, cos_a, 0.0, 0.0)
+        etype, mask = np.zeros(32, np.int64), np.zeros(32, np.int8)
+        etype[0], mask[0] = kind, 1
+        return {"visible_entities": {"features": feats, "entity_type": etype, "mask": mask},
+                "rays": {"distance": np.full(64, 0.5, np.float32), "hit_type": np.ones(64, np.int64)}}
+
+    counts = {"left": 0, "right": 0, "fire_ahead": 0, "fire_side": 0, "steady": 0}
+    for seed in range(200):
+        hunt = C.Hunt(np.random.default_rng(seed))
+        counts["left"] += int(hunt.act(obs(0.5, 0.87), {})[C.TURN_L])
+        counts["right"] += int(hunt.act(obs(-0.5, 0.87), {})[C.TURN_R])
+        counts["fire_side"] += int(hunt.act(obs(0.5, 0.87), {})[C.ATTACK])
+        ahead = hunt.act(obs(0.01, 1.0), {})
+        counts["fire_ahead"] += int(ahead[C.ATTACK])
+        counts["steady"] += int(not ahead[C.TURN_L] and not ahead[C.TURN_R])
+    assert counts["left"] >= 170 and counts["right"] >= 170 and counts["fire_ahead"] >= 170 and counts["steady"] >= 150
+    assert counts["fire_side"] <= 40                            # only the wanderer's occasional shot
+    medikit = C.Hunt(np.random.default_rng(0)).act(obs(0.5, 0.87, kind=5), {})          # not an enemy: plain wandering
+    assert medikit.shape == (9,)
+
+
+def test_mining_keeps_frames_on_which_the_earlier_detector_fires(tmp_path):
+    torch.manual_seed(0)
+    det = ExitDetector()
+    with torch.no_grad():
+        det.fc2.weight.zero_()
+        det.fc2.bias.copy_(torch.tensor([5.0, 0.3, 0.0]))        # a detector that fires on every frame
+    weights = tmp_path / "always.pt"
+    torch.save({"state_dict": det.state_dict(), "config": {}}, str(weights))
+    bare = HALL.replace("E", ".")                               # no pad: every firing is false
+    plain = C.collect_map(job(bare, tmp_path, name="plain", frames=400, seed=3))
+    mined = C.collect_map({**job(bare, tmp_path, name="mined", frames=400, seed=3), "miner": str(weights)})
+    assert plain["error"] == mined["error"] == "" and plain["mined"] == 0
+    assert mined["mined"] >= 50 and not mined["fields"]["visible"].any()
+    assert len(mined["rgb"]) / mined["steps"] > 1.3 * len(plain["rgb"]) / plain["steps"]       # more frames kept per step played
+
+
+def test_pad_at_edge_marks_negatives_that_show_a_pad():
+    f = D.empty_fields(5)
+    f["pad_px"][:] = [40, 40, 40, 2, 40]
+    f["pad_dist"][:] = [200, 200, 200, 200, 1200]
+    f["weapon"][:] = [2, 2, 0, 2, 2]                            # 0: an older shard without pad_los
+    f["pad_los"][:] = [1, 0, 0, 1, 1]
+    f["tags"][2] = 0
+    assert D.pad_at_edge(f).tolist() == [True, False, True, False, False]
+    f["tags"][2] = D.TAG_BIT["hurt"]                            # the red tint explains the red pixels
+    f["visible"][0] = True
+    assert D.pad_at_edge(f).tolist() == [False, False, False, False, False]
 
 
 def test_pad_pixels_tell_a_drawn_pad_from_one_that_is_not(tmp_path):
@@ -455,7 +678,7 @@ def test_tags_name_what_is_in_view(tmp_path):
 
 
 def test_collect_set_writes_a_loadable_set(tmp_path):
-    jobs = C.plan({"unseen": 20, "heldout": 0, "val": 0, "train": 0, "calib": 0})["unseen"][:2]
+    jobs = C.plan({"unseen": 20} | {k: 0 for k in C.SETS if k != "unseen"})["unseen"][:2]
     summary = C.collect_set("unseen", jobs, tmp_path / "unseen", workers=0, frames_per_map=10, progress=False)
     assert summary["frames"] == 10 * len(jobs) and not summary["errors"]
     data = D.load_set(tmp_path / "unseen", top=ExitDetector.TOP)
@@ -466,7 +689,9 @@ def test_collect_set_writes_a_loadable_set(tmp_path):
     logit, pos = E.predict(ExitDetector(), data["rgb"], top=ExitDetector.TOP)
     assert logit.shape == (summary["frames"],) and pos.shape == (summary["frames"], 2)
     rows = E.evaluate_sets(ExitDetector(), tmp_path, ["unseen"])
-    assert [r["subset"] for r in rows] == ["all", "random look"] and rows[0]["frames"] == summary["frames"]
+    names = [r["subset"] for r in rows]
+    assert names[:2] == ["all", "random look"] and all(n.startswith("holding ") for n in names[2:]) and len(names) >= 3
+    assert rows[0]["frames"] == summary["frames"] == sum(r["frames"] for r in rows[2:])
 
 
 # ---- the trained weights -------------------------------------------------------------------------------

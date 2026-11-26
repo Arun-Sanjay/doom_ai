@@ -1,0 +1,27 @@
+{
+  "rollout": 64,
+  "workers": 96,
+  "envs_per_worker": 12,
+  "total_steps": 400000000,
+  "checkpoint_every": 25,
+  "stats_window": 1000,
+  "heldout_every": 150,
+  "heldout_envs": 384,
+  "heldout_workers": 16,
+  "ppo": {"bootstrap_on_truncation": false, "epochs": 3, "minibatch_chunks": 256, "lr": 0.0003, "lr_final": 0.2,
+          "lr_warmup": 30, "target_kl_unlabelled": 0.02,
+          "distill_coef": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5], "field_coef": 10.0, "field_gamma": 0.95},
+  "vec": {"teacher": "real", "reward": {"hit_bonus": 0.05}},
+  "teach": {"beta_start": 1.0, "beta_floor": 0.1, "beta_steps": 30000000},
+  "distill": {"levels": [1.0, 0.5, 0.25, 0.1, 0.03, 0.0], "tolerance": 0.06, "patience": 2, "min_rate": 0.3},
+  "curriculum": {
+    "stages": [
+      {"name": "nav", "weights": [0.7, 0.3, 0.0, 0.0, 0.0], "focus": [0], "threshold": 2.0, "max_steps": 15000000},
+      {"name": "doors", "weights": [0.25, 0.25, 0.5, 0.0, 0.0], "focus": [2], "threshold": 2.0, "max_steps": 25000000},
+      {"name": "keys", "weights": [0.1, 0.2, 0.3, 0.4, 0.0], "focus": [2, 3], "threshold": 2.0, "max_steps": 40000000},
+      {"name": "gauntlet", "weights": [0.05, 0.2, 0.15, 0.2, 0.4], "focus": [4], "threshold": 2.0, "max_steps": 60000000}
+    ],
+    "adaptive_tiers": [1, 2, 3, 4],
+    "adaptive_floor": 0.3
+  }
+}

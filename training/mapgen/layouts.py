@@ -7,17 +7,16 @@
 
 Tiers follow docs/EVALUATION.md, plus a tier 0 for the start of the curriculum:
 
-  0  navigation      monster-free maps with an exit: corridors, rooms, doors, dead ends; about 40%
-                     of them also have one key and one locked door
+  0  navigation      monster-free maps with an exit: corridors, rooms, doors, dead ends; one map
+                     in three also has one key and its locked door on the way to the exit
   1  combat arena    open rooms with cover and monsters, about half with an exit
   2  exploration     many rooms, corridors, doors and dead ends, light opposition
-  3  keys and locks  key -> locked door -> exit, the door usually met before its key; light
-                     opposition, and about 40% of the maps have no monster at all
+  3  keys and locks  key -> locked door -> exit, the door usually met before its key
   4  gauntlet        two or three locks of different colours, ambushes, scarce pickups
 
-Tiers 2 and 3 test exploration and key-and-door progression, not combat, so part of their maps can
-be finished without firing a shot, and `without_monsters` turns any map into a monster-free copy
-with the same layout and tick cap (used to train and to score navigation apart from combat).
+Keys and locked doors can be learned before any combat on the tier 0 maps that have them, and
+`without_monsters` turns any map into a monster-free copy with the same layout and tick cap (used to
+train and to score navigation apart from combat).
 
 A map is built in passes. A *carver* (strip, arena, house, scatter, maze, cave) cuts floor out of
 solid wall. Generic passes then place the start, the exit pad (in an alcove, at a corridor end,
@@ -57,25 +56,27 @@ WIDE_MONSTERS = "dgok"       # radius 24-31: placed in rooms, never in 1-wide pa
 MONSTER_MIX = {
     1: (("z", 22), ("s", 14), ("i", 24), ("c", 7), ("d", 11), ("g", 4), ("l", 6), ("o", 7), ("k", 5)),
     2: (("z", 45), ("i", 30), ("s", 15), ("d", 10)),
-    # Tier 3 tests keys, locked doors and backtracking, not combat: light opposition only, without
-    # chaingunners, demons or spectres.
-    3: (("z", 32), ("i", 28), ("s", 15), ("l", 5)),
+    3: (("z", 32), ("i", 28), ("s", 15), ("d", 10), ("c", 6), ("l", 5), ("g", 4)),
     4: (("z", 18), ("s", 15), ("i", 20), ("c", 12), ("d", 10), ("g", 6), ("l", 6), ("o", 7), ("k", 6)),
 }
 MONSTER_HP_PER_CELL = {1: 8, 2: 3, 3: 4, 4: 8}   # cap on total monster health per open cell
-MIN_MONSTERS = {0: 0, 1: 2, 2: 0, 3: 0, 4: 4}
-MONSTER_FREE = {2: 0.35, 3: 0.4}                 # share of the maps of a tier that get no monster at all
+MIN_MONSTERS = {0: 0, 1: 2, 2: 0, 3: 1, 4: 4}
+MONSTER_FREE = {2: 0.35}                         # share of the maps of a tier that get no monster at all
 # Build options that only concern monsters; a monster-free copy of a map drops them.
 MONSTER_OPTIONS = ("ambush", "thing_angles")
 # Rough damage a pickup lets the player deal, in pistol bullets (about 10 damage each).
 AMMO_VALUE = {"n": 10, "x": 50, "t": 28, "f": 56, "j": 20}
 START_BULLETS = 50
 
-# `locks` is ((number of locks, weight), ...), drawn once per draft. A draft that asks for a lock
-# needs a chokepoint on its route and is discarded more often than one that does not, so tier 0 asks
-# for a lock in 6 drafts of 10 and ends up with one in about 40% of its maps (400 of seeds 0-999).
+# Every KEY_STAGE_EVERY-th tier 0 seed gives a map with one key and one locked door of its colour on
+# the route to the exit (`has_key_stage`). The choice depends on the seed alone, so the other tier 0
+# seeds give exactly the maps they would give without this.
+KEY_STAGE_EVERY = 3
+KEY_STAGE_LOCKS = ((1, 1),)
+
+# `locks` is ((number of locks, weight), ...), drawn once per draft.
 TIERS = {
-    0: dict(name="navigation", size=(8, 18), exit_chance=1.0, locks=((0, 4), (1, 6)), ammo=0.0,
+    0: dict(name="navigation", size=(8, 18), exit_chance=1.0, locks=((0, 1),), ammo=0.0,
             doors=(0.0, 0.3, 0.6, 0.9, 1.0, 1.0),
             styles=(("strip", 3), ("arena", 2), ("house", 5), ("scatter", 4), ("maze", 4), ("cave", 1)),
             min_open=6, min_route=3, ticks=((2100, 5), (2450, 2), (2800, 2), (3500, 1))),
@@ -795,16 +796,15 @@ def place_doors(g: Grid, rng: random.Random, density: float) -> int:
 
 def place_monsters(g: Grid, rng: random.Random, tier: int, start) -> list[tuple[int, int]]:
     """Scatter monsters away from the start. In tiers 3 and 4 some guard a key or the exit, and in
-    tier 4 some wait beside doors. A share `MONSTER_FREE` of the maps of tiers 2 and 3 gets none, so
-    these tiers can also be learned and scored as pure navigation. Returns the cells whose monster
-    gets the ambush flag."""
+    tier 4 some wait beside doors. A share `MONSTER_FREE` of the tier 2 maps gets none. Returns the
+    cells whose monster gets the ambush flag."""
     area = len(g.open_cells())
     if tier == 1:
         count = rng.randint(2, max(3, min(12, area // 9)))
     elif tier == 2:
         count = 0 if rng.random() < MONSTER_FREE[2] else rng.randint(1, min(6, 2 + area // 60))
     elif tier == 3:
-        count = 0 if rng.random() < MONSTER_FREE[3] else rng.randint(1, min(8, 3 + area // 50))
+        count = rng.randint(1, min(8, 3 + area // 50))
     else:
         count = rng.randint(4, min(16, 6 + area // 30))
     dist = g.dist(start)
@@ -957,8 +957,9 @@ def tick_cap(rng: random.Random, tier: int, sol: Solution) -> int:
     return min(cap, MAX_TICKS)
 
 
-def draft(tier: int, rng: random.Random) -> dict:
-    """One attempt at a map of the given tier. Raises Reject if the attempt does not work out."""
+def draft(tier: int, rng: random.Random, lock_counts=None) -> dict:
+    """One attempt at a map of the given tier. Raises Reject if the attempt does not work out.
+    `lock_counts` replaces the tier's own ((number of locks, weight), ...) when given."""
     spec = TIERS[tier]
     lo, hi = spec["size"]
     w = rng.randint(lo, hi)
@@ -978,7 +979,7 @@ def draft(tier: int, rng: random.Random) -> dict:
     if has_exit:
         exit_cell, exit_style = place_exit(g, rng, start, rng.choice(EXIT_STYLES),
                                            far=rng.choice((0.3, 0.5, 0.5, 0.7, 0.9)))
-        want = pick(rng, spec["locks"])
+        want = pick(rng, lock_counts or spec["locks"])
         if want:
             locks = place_locks(g, rng, start, exit_cell, want)
             if len(locks) < min(want, 2 if tier == 4 else 1):
@@ -1014,15 +1015,22 @@ def draft(tier: int, rng: random.Random) -> dict:
             "episode_ticks": tick_cap(rng, tier, sol), "options": options, "counts": counts}
 
 
+def has_key_stage(tier: int, seed: int) -> bool:
+    """Whether map (tier, seed) is a tier 0 map with a key and a locked door: one tier 0 seed in
+    `KEY_STAGE_EVERY` (seeds 2, 5, 8, ...)."""
+    return tier == 0 and seed % KEY_STAGE_EVERY == KEY_STAGE_EVERY - 1
+
+
 def generate(tier: int, seed: int) -> dict:
     """The map of (tier, seed) in the reference dialect: grid, tick cap, build options and counts.
     Deterministic: the same arguments always give the same map."""
     if tier not in TIERS:
         raise ValueError(f"unknown tier {tier}")
+    lock_counts = KEY_STAGE_LOCKS if has_key_stage(tier, seed) else None
     for attempt in range(MAX_ATTEMPTS):
         rng = random.Random(f"mapgen-v1/{tier}/{seed}/{attempt}")
         try:
-            out = draft(tier, rng)
+            out = draft(tier, rng, lock_counts)
         except Reject:
             continue
         out["seed"] = seed

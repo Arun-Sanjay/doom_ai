@@ -2,12 +2,28 @@
 
     .venv/bin/python training/bench/model_latency.py                 # full report, about a minute
     .venv/bin/python training/bench/model_latency.py --quick         # short smoke run
+    .venv/bin/python training/bench/model_latency.py --steps-only    # step latency and thread check only
     .venv/bin/python training/bench/model_latency.py --train mps     # also learner throughput at batch 4096
     .venv/bin/python training/bench/model_latency.py --train-only --train cuda cpu   # learner throughput alone
 
-Inference numbers are batch 1, one thread (torch.set_num_threads(1)), torch.inference_mode(), with the
-manager running on the first step of an episode and then every MANAGER_PERIOD steps. The budget is
-BUDGET_MS mean per step for both networks together, averaged over manager and non-manager steps.
+    # the same measurement inside the official image, under the evaluation CPU quota
+    docker run --rm --cpus 1 -v "$PWD":/workspace:ro -w /workspace devforge-doom:latest \
+        python training/bench/model_latency.py --quick
+
+Inference numbers are batch 1, one thread, torch.inference_mode(), with the manager running on the
+first step of an episode and then every MANAGER_PERIOD steps. The budget is BUDGET_MS mean per step
+for both networks together, averaged over manager and non-manager steps.
+
+One thread, as at evaluation. The agent server starts the agent with OMP_NUM_THREADS,
+MKL_NUM_THREADS and OPENBLAS_NUM_THREADS set to 1 (doom_env.limits.THREAD_ENV), and these are read
+when torch loads. torch.set_num_threads(1) alone is not enough on every build: in the official
+linux/arm64 image the convolution library keeps its own pool of one thread per host core, which
+under a one-CPU quota spends most of each scheduling period throttled. Run as a script, this file
+therefore sets the same variables (unless they are already set) before it imports torch, and it
+prints what it measured about threads: the operating-system threads of the process, how many of
+them did real work during the timed loop, process CPU time over wall time, and the cgroup's
+throttled periods. A run in which more than one thread worked is reported as not valid.
+
 The machine is shared, so every figure is taken over several repeats: the table shows the repeat
 with the lowest mean and the spread of the means says how noisy the run was.
 """
@@ -16,10 +32,28 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import sys
 import time
 from pathlib import Path
+
+# The variables the agent server sets so that numerical libraries start one compute thread.
+ONE_THREAD_ENV = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+
+
+def pin_one_thread_env(environ=os.environ) -> dict:
+    """Give the one-thread variables the value "1" where they are unset; returns the values in force.
+
+    They are read when torch loads, so this only has an effect before the first `import torch`.
+    """
+    for name in ONE_THREAD_ENV:
+        environ.setdefault(name, "1")
+    return {name: environ[name] for name in ONE_THREAD_ENV}
+
+
+if __name__ == "__main__":                                      # as a script only: importing this module changes nothing
+    pin_one_thread_env()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # repo root, so the script also runs by path
 
@@ -32,6 +66,99 @@ from doomnet.model import ExitDetector, PolicyNet  # noqa: E402
 
 BUDGET_MS = 5.5
 EPISODE_STEPS = 525          # shortest tick cap: 2100 tics / 4
+
+
+def thread_cpu_seconds() -> dict | None:
+    """CPU seconds used so far by each operating-system thread of this process (Linux; None elsewhere)."""
+    tasks = Path("/proc/self/task")
+    if not tasks.is_dir():
+        return None
+    tick = os.sysconf("SC_CLK_TCK")
+    used = {}
+    for task in tasks.iterdir():
+        try:
+            fields = (task / "stat").read_text().rsplit(")", 1)[1].split()   # fields after the name: utime, stime are 11, 12
+            used[int(task.name)] = (int(fields[11]) + int(fields[12])) / tick
+        except (OSError, ValueError, IndexError):                          # the thread ended while we were reading
+            pass
+    return used
+
+
+def cgroup_cpu() -> dict | None:
+    """CPU quota (in CPUs, None = unlimited) and throttling counters of this container (cgroup v2; None elsewhere)."""
+    try:
+        stat = dict(line.split() for line in Path("/sys/fs/cgroup/cpu.stat").read_text().splitlines())
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+    except (OSError, ValueError):
+        return None
+    return {"quota_cpus": None if quota == "max" else int(quota) / int(period),
+            "periods": int(stat.get("nr_periods", 0)), "throttled": int(stat.get("nr_throttled", 0))}
+
+
+def judge_threads(wall_s: float, cpu_s: float, grew: list[float] | None = None, busy_share: float = 0.05,
+                  max_cpu_over_wall: float = 1.10, min_busy_s: float = 0.02) -> dict:
+    """Did a timed region run on one thread?
+
+    wall_s, cpu_s: wall time and process CPU time of the region. grew: CPU seconds each
+    operating-system thread gained in it (None where that cannot be read). A thread counts as
+    having worked when it gained at least `busy_share` of the busiest thread's gain (and at least
+    `min_busy_s`). Under a CPU quota the CPU-to-wall ratio cannot exceed the quota however many
+    threads compete for it, which is why the per-thread count is needed there.
+    """
+    result = {"wall_s": wall_s, "cpu_s": cpu_s, "cpu_over_wall": cpu_s / max(wall_s, 1e-9), "os_threads": None, "busy_threads": None}
+    if grew:
+        floor = max(busy_share * max(grew), min_busy_s)
+        result["os_threads"], result["busy_threads"] = len(grew), max(1, sum(g >= floor for g in grew))
+    result["single_threaded"] = bool(result["busy_threads"] in (None, 1) and result["cpu_over_wall"] <= max_cpu_over_wall)
+    return result
+
+
+class ThreadMeter:
+    """Checks that a timed region really ran on one thread.
+
+        with ThreadMeter() as meter:
+            ...timed loop...
+        meter.result["single_threaded"]
+
+    torch.get_num_threads() reports torch's own setting, not what the libraries under it do, so this
+    looks at the process from outside: CPU time against wall time, on Linux the CPU time of every
+    operating-system thread, and in a container the cgroup's throttling counters (see judge_threads).
+    """
+
+    def __enter__(self) -> "ThreadMeter":
+        self._threads, self._cgroup = thread_cpu_seconds(), cgroup_cpu()
+        self._wall, self._cpu = time.perf_counter(), time.process_time()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        wall, cpu = time.perf_counter() - self._wall, time.process_time() - self._cpu
+        threads, cgroup = thread_cpu_seconds(), cgroup_cpu()
+        grew = None
+        if threads is not None and self._threads is not None:
+            grew = [used - self._threads.get(tid, 0.0) for tid, used in threads.items()]
+        self.result = judge_threads(wall, cpu, grew)
+        self.result.update(quota_cpus=None, periods=None, throttled_periods=None)
+        if cgroup is not None and self._cgroup is not None:
+            self.result.update(quota_cpus=cgroup["quota_cpus"], periods=cgroup["periods"] - self._cgroup["periods"],
+                               throttled_periods=cgroup["throttled"] - self._cgroup["throttled"])
+
+
+def print_thread_check(check: dict) -> None:
+    """The thread lines of the report: what was set, and what the process actually did."""
+    env = " ".join(f"{name}={os.environ.get(name, 'unset')}" for name in ONE_THREAD_ENV)
+    print("\nThreads during the step-latency loop")
+    print(f"  {'one-thread variables':30s} {env}")
+    print(f"  {'torch intra-op / inter-op':30s} {torch.get_num_threads()} / {torch.get_num_interop_threads()}")
+    if check["os_threads"] is None:
+        print(f"  {'OS threads in the process':30s} not available on this platform (no /proc)")
+    else:
+        print(f"  {'OS threads in the process':30s} {check['os_threads']}, of which {check['busy_threads']} did work")
+    print(f"  {'process CPU time / wall time':30s} {check['cpu_over_wall']:.2f}")
+    if check["periods"] is not None:
+        quota = "no quota" if check["quota_cpus"] is None else f"quota {check['quota_cpus']:.2f} CPU"
+        print(f"  {'cgroup':30s} {quota}, {check['throttled_periods']} of {check['periods']} periods throttled")
+    verdict = "yes" if check["single_threaded"] else "NO: more than one thread worked, this is not the evaluation setting"
+    print(f"  {'single-threaded':30s} {verdict}")
 
 
 def make_inputs(batch: int, seq: int | None = None, device="cpu", seed: int = 0, uint8_map: bool = True) -> dict:
@@ -214,8 +341,9 @@ def train_throughput(device: str, batch: int = 256, seq: int = 16, iters: int = 
 
 def inference_report(net: PolicyNet, det: ExitDetector, args, report: dict) -> None:
     """Step latency, per-component times and the variants: prints them and fills `report`."""
-    best, means = repeat_steps(net, det, args.steps, args.repeats)
-    report["steps"], report["repeat_means_ms"] = best, means
+    with ThreadMeter() as meter:
+        best, means = repeat_steps(net, det, args.steps, args.repeats)
+    report["steps"], report["repeat_means_ms"], report["thread_check"] = best, means, meter.result
     print(f"\nStep latency in ms ({args.steps} steps per repeat, {args.repeats} repeats, best repeat shown)")
     print(f"  {'':28s} {'mean':>8s} {'p95':>8s} {'max':>8s} {'steps':>7s}")
     for name, s in best.items():
@@ -223,7 +351,11 @@ def inference_report(net: PolicyNet, det: ExitDetector, args, report: dict) -> N
     mean = best["step (both networks)"]["mean"]
     print(f"  mean over repeats: lowest {min(means):.3f}, median {sorted(means)[len(means) // 2]:.3f}, highest {max(means):.3f} ms "
           f"(spread {100 * (max(means) - min(means)) / min(means):.0f}%)")
-    print(f"  budget {BUDGET_MS} ms mean per step: {'PASS' if mean <= BUDGET_MS else 'FAIL'} ({100 * mean / BUDGET_MS:.0f}% used)")
+    verdict = "NOT VALID (not single-threaded, see below)" if not meter.result["single_threaded"] else "PASS" if mean <= BUDGET_MS else "FAIL"
+    print(f"  budget {BUDGET_MS} ms mean per step: {verdict} ({100 * mean / BUDGET_MS:.0f}% used)")
+    print_thread_check(meter.result)
+    if args.steps_only:
+        return
 
     report["components_us"] = time_components(net, det, 300 if args.quick else 2000, 3 if args.quick else 5)
     print("\nPer-component time in microseconds (each stage alone; * = manager steps only)")
@@ -256,6 +388,7 @@ def main() -> None:
     ap.add_argument("--train", nargs="*", default=[], metavar="DEVICE", help="also measure learner throughput on these devices (cpu, mps, cuda)")
     ap.add_argument("--train-only", action="store_true", help="skip the inference measurements")
     ap.add_argument("--quick", action="store_true", help="short run for a smoke check")
+    ap.add_argument("--steps-only", action="store_true", help="step latency and the thread check only (no per-component times, no variants)")
     ap.add_argument("--json", type=Path, default=None, help="also write every number to this file")
     args = ap.parse_args()
     if args.quick:
@@ -266,7 +399,8 @@ def main() -> None:
     torch.manual_seed(0)
     net, det = PolicyNet().eval(), ExitDetector().eval()
     report: dict = {"machine": platform.processor() or platform.machine(), "torch": torch.__version__,
-                    "threads": torch.get_num_threads(), "budget_ms": BUDGET_MS, "config": net.config}
+                    "threads": torch.get_num_threads(), "thread_env": {name: os.environ.get(name) for name in ONE_THREAD_ENV},
+                    "budget_ms": BUDGET_MS, "config": net.config}
     print(f"torch {torch.__version__}, {report['machine']}, {torch.get_num_threads()} thread, batch 1, inference mode")
     print(f"PolicyNet config: {net.config}")
 

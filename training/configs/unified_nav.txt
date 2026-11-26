@@ -1,0 +1,76 @@
+unified_nav.json: one-loop training of navigation (tiers 0, 2 and 3 of the training manifest)
+==========================================================================================
+
+What the run does. The student network drives every environment. In the rollout workers the
+navigation teacher (training/teacher) labels each observation it can; the loss is PPO plus a
+distillation term to those labels. Start it from a combat checkpoint with --init.
+
+    --maps    data/maps/train/manifest.jsonl          (only tiers 0, 2, 3 are sampled, see curriculum)
+    --heldout data/maps/dev_nav/manifest.jsonl        (training/suites/dev_nav_v1.jsonl rebuilt: monster-free dev maps)
+
+Sizes
+  workers 96 x envs_per_worker 12 = 1152 environments, rollout 64: 73,728 steps per iteration.
+  ppo.minibatch_chunks 256 (4096 samples), 3 epochs: 54 gradient steps per iteration.
+  total_steps 400 M spans the learning-rate (3e-4 -> 6e-5) and entropy schedules; stop earlier with
+  SIGTERM (a final checkpoint is written) or --max-minutes.
+
+Teacher (vec.teacher = "real")
+  Labels: move, strafe, turn and USE on every step without a visible enemy; sub-goal and target on
+  manager steps (every 8 steps); the travel-step field to the target on those steps. Attack and
+  weapon are never labelled. No labels at all on maps whose start is off the 64-unit grid (about
+  39 % of the training manifest: start_offset, or start_angle not a multiple of 90); those maps are
+  trained by reinforcement alone and show the gap in the log (exit_rate_labelled / exit_rate_unlabelled).
+
+Mixing (teach)
+  beta = probability that the teacher's action is executed on a labelled step, and on a manager
+  step that the manager's sub-goal and target are forced to the teacher's. 1.0 at the start, linear
+  to 0.1 over the first 30 M steps, then 0.1. Forced steps are left out of the PPO policy term and
+  kept in the value and distillation terms. Mixing stops when the distillation weight reaches 0.
+
+Loss (ppo)
+  distill_coef: weights of the six heads (attack and weapon have no labels, so their entries do
+  nothing), the sub-goal and the target cell (0.5; it is a 4096-way choice with a large loss).
+  field_coef 10, field_gamma 0.95: the network's value field is regressed on 0.95 ** (teacher's
+  travel steps) on manager steps where the target in force is the teacher's. The squared error is
+  small next to the cross-entropies (0.02 to 0.04 against 2 to 8), so at coefficient 1 it hardly
+  moved the value propagation: in the laptop check the field then pointed to the right neighbouring
+  cell on 24 % of manager steps, at coefficient 10 on 62 % (training/logs/unified_smoke.txt). With
+  the strict goal bottleneck this field is the controller's only view of the route.
+  bootstrap_on_truncation false: the tick cap is terminal, so running out of time costs the exit
+  reward and leaving on time is learned from reward (the cap itself is not observable; the policy
+  sees an assumed budget).
+
+Keeping what the starting checkpoint can do (ppo.lr_warmup, ppo.target_kl_unlabelled)
+  A combat checkpoint is very sure of its actions and its value field has never been supervised
+  (cross-entropy of the heads about 40 and field error about 18 at the first update, against 2.9
+  and 0.7 from a random start). Those gradients reach the fight steps through the shared layers:
+  without a limit the policy on its own unlabelled steps moved by KL 0.28 after one gradient step
+  and 5 after nine. Two settings prevent that:
+    lr_warmup 30             the learning rate rises linearly over the first 30 updates
+    target_kl_unlabelled 0.02  an update ends as soon as the policy has moved by more than 1.5 x 0.02
+                             (KL) on the steps it chose itself and the teacher has no controller
+                             label for: fights and unlabelled maps
+  In a 6-minute laptop run from the combat checkpoint (40 % tier 0, 60 % arenas) the updates were
+  cut to 2 to 8 of 18 minibatches at first and ran in full after about 80 iterations; kills per
+  monster stayed at 0.5 to 0.6 while the heads' cross-entropy fell from 42 to 1.6 and the field
+  error from 18.7 to 0.03 (training/logs/unified_smoke.txt). Columns: kl_unlabelled, minibatches.
+
+Distillation weight (distill), driven by the held-out exit rate
+  Every heldout_every = 150 iterations (about 11 M steps) the policy alone plays one episode in each
+  of heldout_envs = 384 environments on the --heldout maps with the agent's decoding and the
+  evaluation budget. The weight steps down one level (1 -> 0.5 -> 0.25 -> 0.1 -> 0.03 -> 0) when that
+  rate is at least min_rate and has not fallen more than tolerance below the rate at the last step
+  down; two bad reports in a row step it back up.
+  tolerance 0.06 (default 0.03): 384 episodes give a standard error of at most 0.026 per
+  measurement, 0.036 for the difference of two, so 0.03 would be inside the noise.
+  min_rate 0.5: while the policy alone exits less than half of the held-out maps the weight stays at 1.
+
+Curriculum
+  Stage budgets in environment steps, not success thresholds (threshold 2.0 can never be met):
+  while beta is high the exit rate in training is the teacher's, so it says nothing about the student.
+    nav_free   tier 0 only, the monster-free maps              first 15 M steps
+    nav_doors  tier 0 40 %, tier 2 60 %                         next 25 M steps
+    nav_keys   tier 0 20 %, tier 2 35 %, tier 3 45 %            until the end
+  Tiers 2 and 3 contain monsters; fighting there comes from the combat checkpoint and from reward
+  (vec.reward.hit_bonus 0.05 as in the combat run). Arenas are not sampled here: use unified_full
+  when combat must be kept.

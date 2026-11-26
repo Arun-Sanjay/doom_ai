@@ -20,6 +20,8 @@ N_CELLS = spec.CROP_SIZE * spec.CROP_SIZE
 class StandInPolicy(nn.Module):
     """Encoders -> GRU cell -> manager (sub-goal, target cell) -> controller heads and two values."""
 
+    partial_forcing = True          # ``forced`` entries of -1 are rows that choose for themselves
+
     def __init__(self, hidden: int = 64):
         super().__init__()
         self.hidden = hidden
@@ -59,13 +61,14 @@ class StandInPolicy(nn.Module):
         tgt_logits = (self.row_head(h)[:, :, None] + self.col_head(h)[:, None, :]).flatten(1)
         if run_manager is None:
             run_manager = torch.ones(B, dtype=torch.bool, device=rays.device)
-        if forced is not None:
-            new_sub, new_tgt = forced["subgoal"], forced["target"]
-        elif sample:
+        if sample:
             new_sub = torch.multinomial(F.softmax(sub_logits, -1), 1).squeeze(1)
             new_tgt = torch.multinomial(F.softmax(tgt_logits, -1), 1).squeeze(1)
         else:
             new_sub, new_tgt = sub_logits.argmax(-1), tgt_logits.argmax(-1)
+        if forced is not None:                          # a negative entry leaves that row its own choice
+            new_sub = torch.where(forced["subgoal"] >= 0, forced["subgoal"].long(), new_sub)
+            new_tgt = torch.where(forced["target"] >= 0, forced["target"].long(), new_tgt)
         sub = torch.where(run_manager, new_sub, state["subgoal"])
         tgt = torch.where(run_manager, new_tgt, state["target"])
 

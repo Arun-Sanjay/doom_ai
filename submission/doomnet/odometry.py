@@ -20,15 +20,26 @@ Position, disturbed steps
     instead: walls do not move, so every wall point of the new scan must lie on the straight wall
     that the previous scan saw at that place. Each matched ray gives one linear equation
     `n . t = b` in the displacement t (n = wall normal); all of them are solved together by gated
-    least squares (a 2x2 system, closed form).
+    least squares (a 2x2 system, closed form). A new point is only ever paired with a previous
+    point of its own kind (wall with wall, door with door) whose wall runs in the same direction
+    as the new scan's own wall at that point. A surface that has just come into view (the room
+    behind a door that is opening, the far side of a corner) has no such partner and is left out
+    instead of being matched to an unrelated wall.
 
     Where the walls in view constrain one direction only (a long corridor), the other component
     comes from a model of the engine's wall slide: for each tic at which the body could first have
     touched the wall, the model is fitted to the measured approach and to the reported momentum,
     and the tic that explains both is used. If no tic does, the momentum lost along the wall is
     spread over the step (one impulse if the measured direction can time it, else evenly).
-    A monster standing in the way in such a corridor shows in the rays that end on it; a blocked
-    tic leaves no momentum, so the reported momentum tells how many free tics followed the block.
+    A single ray that does see along the corridor (its far end) is used instead of these models
+    when what it measures lies between "did not move" and the free prediction.
+    A monster standing in the way in such a corridor shows in the rays that end on it: the ray
+    that comes closest gives its centre and so the room in front of it. A blocked tic leaves no
+    momentum, so the reported momentum tells how many free tics followed the block; before the
+    block the body used up at most that room, and no model may carry it further. If the gap to
+    the monster closed by clearly less than that, the monster backed away and the body is taken
+    to have followed it. How far a monster moves within one step is otherwise unknown, and is
+    the main source of the drift that is left.
 
 Position, wedged steps
     A body that runs squarely into the end of a wall can be stopped without any change of
@@ -75,9 +86,12 @@ MIN_WALL_RANGE = 15.0         # units: a solid wall is never nearer than the bod
                               # nearer "wall" is a ledge the player is stepping over, and is ignored
 COLLINEAR_TOL = 0.02          # units: a wall point may be this far off the chord of its two neighbours
 PAIR_MIN_FACING = 0.5         # two neighbouring rays form a wall only if it faces the viewer this much (cosine)
+PAIR_MIN_COS = 0.9            # a new wall point pairs with a previous one only if their wall directions agree this well
 GATES = (24.0, 6.0, 0.75)     # units: residual gates of the three least-squares passes
 GATE_SLACK = 3.0              # units added to the physical bound on the first gate
 MIN_SUPPORT = 2.0             # a direction is measured when the rays' squared normals along it sum to this
+WEAK_SUPPORT = 0.9            # ... and one ray's worth is enough if what it says is physically possible:
+WEAK_SLACK = 1.0              # between "did not move" and the free prediction, give or take this many units
 MIN_INLIERS = 0.85            # share of matched rays that must agree before one start point is trusted
 SLIDE_MOMENTUM_TOL = 0.05     # units/tic and units: scales of the mismatch between the wall-slide model
 SLIDE_APPROACH_TOL = 0.02     # and the reported momentum / the measured approach to the wall
@@ -85,8 +99,13 @@ SLIDE_ACCEPT = 40.0           # the model is used when the squared, scaled misma
 STOP_PENALTY = 4.5            # ... and a cut-short slide must fit this many times better than a plain one
 IMPULSE_MIN = 0.5             # units/tic: smallest measured momentum change that can time an impulse
 MAIN_WALL_COS = 0.985         # rays within 10 degrees of the main wall's normal define that wall
-BODY_REACH = 40.0             # units: a ray that ends on a monster this close ahead means the monster is in the way
-BODY_GAP = 18.0               # units: range of such a ray when the two bodies touch head-on (16) plus slack
+BODY_HALF = 16.0              # units: half-width of the player's body
+MONSTER_HALF = 20.0           # units: half-width assumed for a monster (most are 20; the widest common one is 30)
+BODY_NEAR = 24.0              # units: a monster with less room than this in front of it is "in the way"
+BODY_SLACK = 1.0              # units: a blocked body stops a little short of the monster
+BODY_RETREAT = 3.0            # units: the gap to a monster closing this much less than the body advanced means
+BODY_RETREAT_SQUARE = 1.0     # it backed away; less when the monster stands squarely ahead in both scans
+BODY_SQUARE_COS = 0.98        # ... that is, within about one ray of the direction of travel
 BODY_MATCH = 0.05             # units/tic: how well the reported momentum must fit a "stopped by a monster" history
 
 _F = FRICTION
@@ -203,7 +222,7 @@ class Odometry:
         c, s = _COS_L[h], _SIN_L[h]
         ox, oy = vf * c + vr * s, vf * s - vr * c                   # reported momentum in the start frame
         rx, ry = ox - mx, oy - my                                   # mismatch with the prediction
-        scan = self._scan
+        scan, new = self._scan, _make_scan(dist, hit, h)
         if rx * rx + ry * ry < FREE_TOL * FREE_TOL:
             # Free step. The small remainder is thrust the model placed a hair off (the engine rounds
             # the thrust direction to 1/8192 of a circle); spread it over the step as a constant force.
@@ -213,7 +232,7 @@ class Odometry:
             if scan is not None and scan[3] < CHECK_RADIUS + abs(dx) + abs(dy):
                 ex, ey = scan[4] - dx, scan[5] - dy
                 if float((ex * ex + ey * ey).min()) < CHECK_RADIUS * CHECK_RADIUS:
-                    match = _ScanMatch(scan, dist, hit, h)
+                    match = _ScanMatch(scan, new)
                     if not match.empty and match.outliers(dx, dy) > MAX_OUTLIERS * match.count:
                         tx, ty = self._measure(match, dx, dy, 0.0, 0.0, m0x, m0y, ax, ay, ox, oy, True)
                         if (tx - dx) ** 2 + (ty - dy) ** 2 < CONFIRM_TOL * CONFIRM_TOL:
@@ -227,11 +246,11 @@ class Odometry:
                 dx, dy = dx + FORCE_GAIN * rx, dy + FORCE_GAIN * ry
                 self.last_mode = "model"
             else:
-                dx, dy = self._measure(_ScanMatch(scan, dist, hit, h), dx, dy, rx, ry, m0x, m0y, ax, ay, ox, oy, False)
+                dx, dy = self._measure(_ScanMatch(scan, new), dx, dy, rx, ry, m0x, m0y, ax, ay, ox, oy, False)
         self.x += dx
         self.y += dy
         self._mx, self._my = ox, oy
-        self._scan = _make_scan(dist, hit, h)
+        self._scan = new
 
     # ------------------------------------------------------------------------------------------
     def _measure(self, match, dx, dy, rx, ry, m0x, m0y, ax, ay, ox, oy, momentum_ok):
@@ -278,6 +297,15 @@ class Odometry:
             e1x, e1y = 0.0, 1.0
         norm = math.hypot(e1x, e1y)
         e1x, e1y = e1x / norm, e1y / norm
+        if l2 >= WEAK_SUPPORT:
+            # One ray or so sees along the other direction (the far end of a corridor). It is used
+            # if what it says is physically possible: nothing here pushes the body, so along that
+            # direction it moved between "not at all" and the free prediction.
+            tx, ty = (a22 * g1 - a12 * g2) / det, (a11 * g2 - a12 * g1) / det
+            t2, f2 = e1x * ty - e1y * tx, e1x * dy - e1y * dx
+            if min(f2, 0.0) - WEAK_SLACK <= t2 <= max(f2, 0.0) + WEAK_SLACK:
+                self.last_mode = "rays"
+                return tx, ty
         # A stray ray on some other wall tilts that eigenvector a little, which matters to the slide
         # model below: rebuild e1 and the measured component from the rays of the main wall alone.
         along = njx * e1x + njy * e1y
@@ -294,35 +322,39 @@ class Odometry:
         r1, r2 = e1x * rx + e1y * ry, e2x * rx + e2y * ry
         free2, o2 = e2x * dx + e2y * dy, e2x * ox + e2y * oy
         if abs(r2) > BODY_MATCH:
-            # No speed along e2 before or after the step although the thrust should have built some:
-            # something solid held the body in place for the whole step.
-            if abs(o2) < BODY_MATCH and abs(e2x * m0x + e2y * m0y) < BODY_MATCH:
-                self.last_mode = "rays+body"
-                return e1x * t1, e1y * t1
-            # A monster right ahead along e2: it may have been in the way for part of the step.
             sign = 1.0 if free2 > 0.0 else -1.0
-            if _body_ahead(*match.new, sign * e2x, sign * e2y) < BODY_REACH:
+            room_now, square_now = _body_room(*match.new, sign * e2x, sign * e2y)
+            if room_now < BODY_NEAR:
+                # A monster right ahead along e2: it may have been in the way for part of the step.
                 scan = self._scan
-                before = _body_ahead(scan[0], scan[8], scan[2], sign * e2x, sign * e2y)
+                room, square = _body_room(scan[0], scan[8], scan[2], sign * e2x, sign * e2y)
                 t2 = _body_block(sign * (e2x * m0x + e2y * m0y), [sign * (e2x * ax[i] + e2y * ay[i]) for i in range(4)],
-                                 sign * o2, before - BODY_GAP, before < BODY_REACH)
+                                 sign * o2, room - BODY_SLACK, room - room_now,
+                                 BODY_RETREAT_SQUARE if square and square_now else BODY_RETREAT)
                 if t2 is not None:
                     self.last_mode = "rays+body"
                     return e1x * t1 + e2x * sign * t2, e1y * t1 + e2y * sign * t2
+            elif abs(o2) < BODY_MATCH and abs(e2x * m0x + e2y * m0y) < BODY_MATCH:
+                # No speed along e2 before or after the step although the thrust should have built
+                # some, and nothing in view to give way: the body was held in place for the whole step.
+                self.last_mode = "rays+body"
+                return e1x * t1, e1y * t1
         # Otherwise: the wall-slide model if it explains the step, else an impulse, else the prior.
         free1 = e1x * dx + e1y * dy
         over = free1 - t1                                       # how far the free motion overshot along e1
-        t2, cost = None, SLIDE_ACCEPT
+        t2, cost, plain = None, SLIDE_ACCEPT, False
         # The wall is on the side the free motion overshot; when the overshoot is tiny, try both sides.
         for sign in ((1.0, -1.0) if abs(over) < 0.5 else ((1.0,) if over > 0.0 else (-1.0,))):
-            along, c = _wall_slide(sign * (e1x * m0x + e1y * m0y), sign * (e2x * m0x + e2y * m0y),
-                                   [sign * (e1x * ax[i] + e1y * ay[i]) for i in range(4)],
-                                   [sign * (e2x * ax[i] + e2y * ay[i]) for i in range(4)],
-                                   sign * t1, sign * (e1x * ox + e1y * oy), sign * (e2x * ox + e2y * oy))
+            along, c, stopped = _wall_slide(sign * (e1x * m0x + e1y * m0y), sign * (e2x * m0x + e2y * m0y),
+                                            [sign * (e1x * ax[i] + e1y * ay[i]) for i in range(4)],
+                                            [sign * (e2x * ax[i] + e2y * ay[i]) for i in range(4)],
+                                            sign * t1, sign * (e1x * ox + e1y * oy), sign * (e2x * ox + e2y * oy))
             if c < cost:
-                t2, cost = sign * along, c
+                t2, cost, plain = sign * along, c, not stopped
         if t2 is not None:
             self.last_mode = "rays+slide"
+            if plain:                                           # the slide explains all of the momentum:
+                return e1x * t1 + e2x * t2, e1y * t1 + e2y * t2   # nothing else was in the way
         else:
             self.last_mode = "rays+model"
             gain = -over / r1 if abs(r1) > IMPULSE_MIN else -1.0
@@ -332,6 +364,14 @@ class Odometry:
                 t2 = _even_loss(e2x * m0x + e2y * m0y, [e2x * ax[i] + e2y * ay[i] for i in range(4)], o2)
                 if t2 is None:
                     t2 = free2 + FORCE_GAIN * r2                # a constant force over the step
+        # The momentum was lost to something other than a plain slide. Whatever the model says, the
+        # body cannot have gone through a monster that the previous scan saw in the way: the room
+        # in front of that monster bounds the step.
+        sign = 1.0 if t2 > 0.0 else -1.0
+        scan = self._scan
+        room = max(_body_room(scan[0], scan[8], scan[2], sign * e2x, sign * e2y)[0] - BODY_SLACK, 0.0)
+        if sign * t2 > room:
+            t2 = sign * room
         return e1x * t1 + e2x * t2, e1y * t1 + e2y * t2
 
 
@@ -392,7 +432,7 @@ def _slide_run(mn, mt, an, at, j, f, stop=-1):
 
 
 def _wall_slide(mn, mt, an, at, dn_seen, on, ot):
-    """Displacement along a wall during a step that ran into it: (dt, cost), dt None if nothing fits.
+    """Displacement along a wall during a step that ran into it: (dt, cost, stopped), dt None if nothing fits.
 
     Wall frame as in `_slide_run`; dn_seen is the displacement towards the wall measured from the
     rays, (on, ot) the momentum reported after the step. Every first-contact tic is tried, with
@@ -401,7 +441,7 @@ def _wall_slide(mn, mt, an, at, dn_seen, on, ot):
     slowly); the candidate that best reproduces both the measured approach and the reported
     momentum wins.
     """
-    best, best_cost = None, SLIDE_ACCEPT
+    best, best_cost, stopped = None, SLIDE_ACCEPT, False
     for j in range(4):
         for stop in (-1, *range(j, 4)):
             base = _slide_run(mn, mt, an, at, j, SLIDE_FUDGE, stop)
@@ -427,21 +467,23 @@ def _wall_slide(mn, mt, an, at, dn_seen, on, ot):
                 if stop >= 0:
                     cost *= STOP_PENALTY
                 if cost < best_cost:
-                    best, best_cost = dt, cost
-    return best, best_cost
+                    best, best_cost, stopped = dt, cost, stop >= 0
+    return best, best_cost, stopped
 
 
-def _body_block(mt, at, ot, room, close):
+def _body_block(mt, at, ot, room, closed, retreat):
     """Displacement along a corridor in a step during which a monster in the way stopped the body.
 
     mt: momentum towards the monster at the start, at: thrust of each tic, ot: momentum reported
-    after the step, room: free distance to the monster before the step, close: the monster was
-    within reach before the step. A blocked tic leaves the body where it is with no momentum in
-    that direction, so the reported momentum tells how many free tics followed the last blocked
-    one, and the displacement of those tics is known exactly. Before the last blocked tic the
-    body did not move if it already stood against the monster; otherwise it moved freely for at
-    least the room it had and at most until that tic (the monster may give way): the middle of
-    the two is used. Returns None if the reported momentum fits no such history.
+    after the step, room: free distance to the monster before the step, closed: by how much that
+    distance shrank during the step, retreat: how much less than the body's own advance it must
+    have shrunk before the monster is taken to have backed away. A blocked tic leaves the body where it is with no momentum
+    in that direction, so the reported momentum tells how many free tics followed the last
+    blocked one, and the displacement of those tics is known exactly. Before the last blocked
+    tic the body moved freely until it had used up the room in front of the monster (none at all
+    if it stood against it already). If the distance shrank by clearly less than that, the
+    monster backed away and the body followed it up to the last blocked tic. Returns None if the
+    reported momentum fits no such history.
     """
     for last in range(3, -1, -1):                               # last blocked tic
         u = after = 0.0
@@ -450,8 +492,6 @@ def _body_block(mt, at, ot, room, close):
             after += w
             u = FRICTION * w
         if abs(u - ot) < BODY_MATCH:
-            if close and abs(mt) < BODY_MATCH:
-                return after                                    # it stood against the monster already
             u = mt
             free = 0.0
             for i in range(last):
@@ -459,7 +499,10 @@ def _body_block(mt, at, ot, room, close):
                 free += w
                 u = FRICTION * w
             free = max(free, 0.0)
-            return 0.5 * (min(free, max(room, 0.0)) + free) + after
+            before = min(free, max(room, 0.0))
+            if closed < before + after - retreat:
+                before = free
+            return before + after
     return None
 
 
@@ -496,37 +539,65 @@ def _even_loss(mt, at, ot):
 def _make_scan(r, hit, h):
     """Keep what the next step needs of a scan with ranges r (map units) and hit types.
 
-    Returns (range, static, heading, nearest wall range, static wall x, static wall y, wall x, wall y, hit).
-    Wall points are relative to the scan's own origin, in the start-frame orientation.
+    Returns [range, static, heading, nearest wall range, static wall x, static wall y, wall x, wall y, hit,
+    normals]. Wall points are relative to the scan's own origin, in the start-frame orientation.
+    The last entry is filled in by `_scan_normals` the first time a match needs it.
     """
     static = (hit >= spec.HIT_WALL) & (hit <= spec.HIT_LOCKED) & (r >= MIN_WALL_RANGE)
     rows = (RAY_OFFSETS + h) % HEADINGS
     wx, wy = r * COS[rows], r * SIN[rows]
     sx, sy = wx[static], wy[static]
     near = float(r[static].min()) if len(sx) else float("inf")
-    return r, static, h, near, sx, sy, wx, wy, hit
+    return [r, static, h, near, sx, sy, wx, wy, hit, None]
 
 
-def _body_ahead(r, hit, h, ux, uy) -> float:
-    """Range of the nearest ray that ends on a monster within 45 degrees of the direction (ux, uy); inf if none."""
-    k = np.flatnonzero((hit == spec.HIT_ENEMY) & (r < 4.0 * BODY_REACH))
-    if len(k) == 0:
-        return float("inf")
-    rows = (RAY_OFFSETS[k] + h) % HEADINGS
-    ahead = COS[rows] * ux + SIN[rows] * uy > 0.7
-    return float(r[k][ahead].min()) if ahead.any() else float("inf")
+def _scan_normals(scan):
+    """(nx, ny, known) of a scan's wall points, computed once per scan and kept in the scan."""
+    if scan[9] is None:
+        scan[9] = wall_normals(scan[6], scan[7], scan[1])
+    return scan[9]
 
 
-def wall_normals(px, py, static, tol=COLLINEAR_TOL):
+def _body_room(r, hit, h, ux, uy) -> tuple[float, bool]:
+    """Room in front of the nearest monster in the way: how far the body can move along the unit
+    direction (ux, uy) before the two bodies touch (inf if no monster of the scan is in the way),
+    and whether that monster stands squarely ahead (the room is then known to a fraction of a unit).
+
+    The ray that comes closest to a monster points at its centre, MONSTER_HALF behind the hit.
+    The engine blocks a move when the centres are closer than the sum of the half-widths on both
+    axes, so a monster is in the way if its centre lies within that sum to the side of the path.
+    """
+    e = np.where(hit == spec.HIT_ENEMY, r, np.inf)
+    k = np.flatnonzero((e < 6.0 * BODY_NEAR) & (e <= e[_PREV]) & (e <= e[_NEXT]))
+    if len(k):
+        rows = (RAY_OFFSETS[k] + h) % HEADINGS
+        d = r[k] + MONSTER_HALF
+        cosine = COS[rows] * ux + SIN[rows] * uy
+        ahead = np.flatnonzero((cosine > 0.0) & (np.abs(d * (SIN[rows] * ux - COS[rows] * uy)) < BODY_HALF + MONSTER_HALF))
+        if len(ahead):
+            j = ahead[np.argmin(d[ahead] * cosine[ahead])]
+            return float(d[j] * cosine[j]) - (BODY_HALF + MONSTER_HALF), bool(cosine[j] > BODY_SQUARE_COS)
+    return float("inf"), False
+
+
+def wall_normals(px, py, static, tol=COLLINEAR_TOL, kind=None):
     """Unit normals of the straight walls that the points of one scan lie on.
 
     px, py: (64,) wall points in ray order, relative to the scan origin; static: (64,) bool, True
     where the ray ended on a wall or door; tol: how far a point may lie off the chord of its two
     neighbours, in the units of px and py. A point gets a normal when it and its two neighbours are
-    collinear (the point is then the middle or an end of a straight run of three), or when it and
-    one neighbour form an isolated pair that belongs to no such run (a wall seen by exactly two
-    rays, such as the far end of a corridor). Returns (nx, ny, known): known is False where no
-    wall direction is known. The sign of a normal is arbitrary.
+    collinear (the point is then the middle of a straight run of three), when it is the end of
+    such a run (it takes the normal of the run's middle ray), or when it and one neighbour form an
+    isolated pair that belongs to no such run (a wall seen by exactly two rays, such as the far
+    end of a corridor).
+
+    kind: optional (64,) labels of the surfaces. When given, a point takes a normal from a
+    neighbour only if both have the same label: a door ray that ends on the corner between the
+    door's face and a side wall is collinear with the side wall's points, but it is not part of
+    that wall.
+
+    Returns (nx, ny, known): known is False where no wall direction is known. The sign of a normal
+    is arbitrary.
     """
     pxp, pyp = px[_PREV], py[_PREV]
     cx, cy = px[_NEXT] - pxp, py[_NEXT] - pyp
@@ -536,12 +607,17 @@ def wall_normals(px, py, static, tol=COLLINEAR_TOL):
     nx, ny = cy / clen, -cx / clen
     # Ends of a run take the normal of the run's middle ray.
     end_a, end_b = mid[_NEXT] & ~mid, mid[_PREV] & ~mid & ~mid[_NEXT]
+    link = static & static[_NEXT]                        # rays k and k + 1 may share a wall
+    if kind is not None:
+        link &= kind == kind[_NEXT]
+        end_a &= link
+        end_b = mid[_PREV] & ~mid & ~end_a & link[_PREV]
     nx = np.where(end_a, nx[_NEXT], np.where(end_b, nx[_PREV], nx))
     ny = np.where(end_a, ny[_NEXT], np.where(end_b, ny[_PREV], ny))
     known = mid | end_a | end_b
     # Isolated pairs (k, k+1): the chord between them is the wall, unless it runs nearly along the
     # line of sight (then the two rays ended on different walls, one behind the other).
-    pair = static & static[_NEXT] & ~known & ~known[_NEXT]
+    pair = link & ~known & ~known[_NEXT]
     if pair.any():
         qx, qy = px[_NEXT] - px, py[_NEXT] - py
         qlen = np.sqrt(qx * qx + qy * qy) + 1e-9
@@ -558,31 +634,39 @@ def wall_normals(px, py, static, tol=COLLINEAR_TOL):
 class _ScanMatch:
     """Displacement between the previous scan and the new one.
 
-    Every static ray of the new scan is paired with the nearest wall point of the previous scan
-    and must lie on that point's wall line: n . (t + q - p) = 0, one linear equation in t.
+    Every static ray of the new scan is paired with the nearest compatible wall point of the
+    previous scan and must lie on that point's wall line: n . (t + q - p) = 0, one linear
+    equation in t. Compatible means: the same kind of surface (wall with wall, door with door),
+    and, where the new scan shows the direction of its own wall at that ray, the same direction
+    within PAIR_MIN_COS. New rays with no compatible partner are surfaces the previous scan did
+    not see; they take no part in the match.
     """
 
-    def __init__(self, scan, r, hit, h):
-        nx, ny, known = wall_normals(scan[6], scan[7], scan[1])
+    def __init__(self, prev, new):
+        nx, ny, known = _scan_normals(prev)
         idx = np.flatnonzero(known)
-        self.lx, self.ly, self.nx, self.ny = scan[6][idx], scan[7][idx], nx[idx], ny[idx]     # previous walls
-        keep = np.flatnonzero((hit >= spec.HIT_WALL) & (hit <= spec.HIT_LOCKED) & (r >= MIN_WALL_RANGE))
-        rows = (RAY_OFFSETS[keep] + h) % HEADINGS
-        self.new = (r, hit, h)                                                                # the new scan as observed
-        r = r[keep]
-        self.qx, self.qy = r * COS[rows], r * SIN[rows]                                       # new wall points
+        self.lx, self.ly, self.nx, self.ny = prev[6][idx], prev[7][idx], nx[idx], ny[idx]     # previous walls
+        self.new = (new[0], new[8], new[2])                                                   # the new scan as observed
+        keep = np.flatnonzero(new[1])
+        mx, my, mknown = _scan_normals(new)
+        mx, my = mx[keep], my[keep]
+        clash = (new[8][keep] != spec.HIT_WALL)[:, None] != (prev[8][idx] != spec.HIT_WALL)[None, :]
+        clash |= mknown[keep][:, None] & (np.abs(mx[:, None] * self.nx[None, :] + my[:, None] * self.ny[None, :]) < PAIR_MIN_COS)
+        keep = keep[~clash.all(axis=1)] if clash.size else keep[:0]
+        self._far = clash[~clash.all(axis=1)] * 1.0e12 if clash.size else None                # added to the squared distance
+        self.qx, self.qy = new[6][keep], new[7][keep]                                         # new wall points
         self.count = len(keep)
-        self.empty = len(keep) == 0 or len(idx) == 0
+        self.empty = len(keep) == 0
 
     def _pair(self, tx, ty):
-        """Residual of every new wall point against its nearest previous wall, at displacement (tx, ty).
+        """Residual of every new wall point against its nearest compatible previous wall, at displacement (tx, ty).
 
         Returns (njx, njy, b, residual) with residual = n . t - b.
         """
         lx, ly, qx, qy = self.lx, self.ly, self.qx, self.qy
         ex = (qx + tx)[:, None] - lx[None, :]
         ey = (qy + ty)[:, None] - ly[None, :]
-        j = np.argmin(ex * ex + ey * ey, axis=1)
+        j = np.argmin(ex * ex + ey * ey + self._far, axis=1)
         njx, njy = self.nx[j], self.ny[j]
         b = njx * (lx[j] - qx) + njy * (ly[j] - qy)
         return njx, njy, b, njx * tx + njy * ty - b

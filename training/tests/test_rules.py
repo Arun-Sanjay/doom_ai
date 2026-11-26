@@ -7,15 +7,17 @@ that folder is checked statically:
 
 1. Names (test_submission_text_has_no_banned_names). Every text file under submission/ is read line
    by line, comments, docstrings and Markdown included. No line may contain the name of a banned
-   technique (BANNED_NAMES): the inverse tangent, queue containers and the classic graph searches
-   under their usual names. The eight tokens listed in the build spec count wherever they appear,
-   also inside a longer word, so a harmless word that happens to contain one has to be renamed.
+   technique (BANNED_NAMES): the inverse trigonometric functions, queue containers and the classic
+   graph searches under their usual names. The first eight of the list (atan2, arctan2, heapq,
+   deque, astar, dijkstra, bfs, flood) count wherever they appear, also inside a longer word, so a
+   harmless word that happens to contain one has to be renamed.
 2. Imports and devices (test_submission_code_has_no_banned_constructs). Every Python file under
    submission/ is parsed. Imports from outside the standard library are limited to numpy and torch.
    The engine, the wrapper, network and process modules, stock RL libraries and this repository's
    training/ package are banned (BANNED_MODULES), and so is naming a GPU: `.cuda`, a device ordinal,
    or a string such as "cuda" used for anything but a comparison. Because the code is parsed, a
-   comment that merely mentions one of these does not count.
+   comment that merely mentions one of these does not count. The angle of a complex number
+   (`.angle()`, `.phase()`) is rejected here too: it is the inverse tangent without its name.
 3. Search structure (same test). Names can be avoided, so the parsed code is also checked for the
    shapes a hand-written search over a map takes: an open-ended loop (take a cell, add its
    neighbours, go on until none is left), written as `while` or as a `for` loop left by `break`;
@@ -30,9 +32,11 @@ that folder is checked statically:
    either.
 4. README (test_readme_labels_every_module, test_readme_agrees_with_agent_py). Every module has a
    row in submission/README.md labelled "observation encoding", "action mask" or "learned", and
-   what the README says about agent.py is compared with the file: while agent.py is still the
-   template the README must say so, and once it loads the networks every claim listed in
-   README_CLAIMS needs its counterpart in the code.
+   what the README says about agent.py is compared with the file. While agent.py is still the
+   template's random baseline the README must say so (a status note and the label "placeholder")
+   and must not credit it with parts it does not have; once agent.py imports the networks the note
+   and that label must go, every claim listed in README_CLAIMS needs its counterpart in the code,
+   and every constant and weights file the README cites by name must exist there.
 5. Secrets (test_no_key_like_token_in_repo_files and ..._in_git_history). Every file git would
    commit, and every commit already made, is searched for words shaped like an API key.
 
@@ -109,8 +113,8 @@ ANYWHERE, WORD, AS_WRITTEN = "anywhere", "word", "as written"
 # (name reported, its spelling as a regular expression, how it is matched, why it is banned)
 # ANYWHERE:   the spelling counts wherever it appears, also inside a longer word, in any case.
 # WORD:       the spelling must start a word and the word must end with it, in any case. `dfs2`,
-#             `run_dfs` and `DfsOrder` count; `pdfs`, the hyperbolic `atanh` and the constant
-#             `A_START` do not.
+#             `run_dfs` and `DfsOrder` count; `pdfs`, the hyperbolic `atanh` and `asinh`, the word
+#             `increasing` and the constant `A_START` do not.
 # AS_WRITTEN: the expression is used as it stands.
 BANNED_NAMES = (
     # --- the eight tokens of the build spec: a file that contains one of them fails
@@ -128,6 +132,11 @@ BANNED_NAMES = (
     ("dfs", "dfs", WORD, "depth-first search"),
     ("atan", "atan", WORD, "inverse tangent"),
     ("arctan", "arctan", WORD, "inverse tangent"),
+    ("asin", "asin", WORD, "inverse sine: with the sine of a bearing among the entity features it gives the bearing, as the inverse tangent does"),
+    ("arcsin", "arcsin", WORD, "inverse sine, see 'asin'"),
+    ("acos", "acos", WORD, "inverse cosine, see 'asin'"),
+    ("arccos", "arccos", WORD, "inverse cosine, see 'asin'"),
+    ("cmath", "cmath", WORD, "complex-number module; the phase of x + iy is the two-argument inverse tangent"),
     ("queue", "queue", ANYWHERE, "queue container, the worklist of a graph search"),
     ("frontier", "frontier", ANYWHERE, "frontier of a graph search or of hand-coded exploration"),
     ("wavefront", "wave[-_ ]?front", ANYWHERE, "wavefront expansion over a map"),
@@ -216,6 +225,8 @@ BREAK = ("leaves a loop with `break`. A loop that runs until a condition is met 
          "(see the rule on `while`). Give the loop a fixed count, or use any() or next() to pick an item")
 FRONT_OF_LIST = "takes items from the front of a list ({}), which makes the list a queue: the worklist of a breadth-first search"
 CALLS_ITSELF = "function '{}' calls itself. Recursion is how a region fill or a depth-first search is written by hand"
+COMPLEX_ANGLE = "calls .{}(), the angle of a complex number, which is the two-argument inverse tangent under another name"
+TORCH_INTERFACES = {"multiprocessing": "starts other processes", "hub": "downloads files", "distributed": "network access"}
 
 
 def _starts_process(name: str) -> bool:
@@ -231,6 +242,10 @@ def _import_problem(module: str, names: tuple[str, ...], local: set[str]) -> str
         return f"imports '{module}' ({BANNED_MODULES[top]})"
     if top == "torch" and ("cuda" in parts or "cuda" in names):
         return "imports torch's GPU interface (the agent is CPU only)"
+    if top == "torch":
+        for part in (*parts, *names):
+            if part in TORCH_INTERFACES:
+                return f"imports torch's '{part}' interface ({TORCH_INTERFACES[part]})"
     if top == "os" and any(_starts_process(n) for n in names):
         return "imports a function of the os module that starts another process"
     if top in ALLOWED_PACKAGES or top in local or top in sys.stdlib_module_names:
@@ -256,8 +271,8 @@ def _compared(node: ast.AST):
                 yield item
 
 
-def _problems(node: ast.AST, local: set[str], compared: set[int]):
-    """Rule violations of one syntax-tree node, as messages."""
+def _problems(node: ast.AST, local: set[str], compared: set[int], os_names: set[str]):
+    """Rule violations of one syntax-tree node, as messages. `os_names`: the names the file gives the os module."""
     if isinstance(node, ast.Import):
         for alias in node.names:
             yield _import_problem(alias.name, (), local)
@@ -273,7 +288,9 @@ def _problems(node: ast.AST, local: set[str], compared: set[int]):
             yield "uses '.cuda' (the agent is CPU only)"
         elif node.attr == "accelerator":
             yield "uses '.accelerator', which selects a GPU when there is one (the agent is CPU only)"
-        elif isinstance(node.value, ast.Name) and node.value.id == "os" and _starts_process(node.attr):
+        elif node.attr in TORCH_INTERFACES:
+            yield f"uses '.{node.attr}' ({TORCH_INTERFACES[node.attr]})"
+        elif isinstance(node.value, ast.Name) and node.value.id in os_names and _starts_process(node.attr):
             yield f"uses os.{node.attr}, which starts another process"
     elif isinstance(node, ast.Constant):
         # x.to("cuda"), torch.device("cuda"), f(device="cuda"), device = "cuda", "cuda" if flag else "cpu", f"cuda:{i}"
@@ -296,6 +313,8 @@ def _problems(node: ast.AST, local: set[str], compared: set[int]):
                 yield FRONT_OF_LIST.format(".pop(0)")
             if name in ("popleft", "appendleft"):
                 yield FRONT_OF_LIST.format(f".{name}()")
+            if name in ("angle", "phase"):
+                yield COMPLEX_ANGLE.format(name)
         if name in ("to", "device"):  # x.to(0) and torch.device(0) mean the first GPU
             for arg in node.args:
                 if isinstance(arg, ast.Constant) and type(arg.value) is int:
@@ -338,8 +357,10 @@ def scan_python(folder: Path) -> list[Hit]:
             hits.append(Hit(rel, getattr(e, "lineno", None) or 1, f"cannot be parsed, so it cannot be checked ({e})"))
             continue
         compared = {id(constant) for node in ast.walk(tree) for constant in _compared(node)}
+        os_names = {"os"} | {alias.asname for node in ast.walk(tree) if isinstance(node, ast.Import)
+                             for alias in node.names if alias.name == "os" and alias.asname}
         for node in ast.walk(tree):
-            hits += [Hit(rel, node.lineno, what) for what in _problems(node, local, compared) if what]
+            hits += [Hit(rel, node.lineno, what) for what in _problems(node, local, compared, os_names) if what]
         hits += [Hit(rel, line, what) for line, what in _recursive_calls(tree)]
     return hits
 
@@ -348,13 +369,16 @@ def scan_python(folder: Path) -> list[Hit]:
 # 4. What README.md says about agent.py
 # ---------------------------------------------------------------------------------------------
 LABELS = {"observation encoding", "action mask", "learned"}
+PLACEHOLDER = "placeholder"  # the label of agent.py's row, and only of that row, while agent.py is the template's random baseline
 README_ROW = re.compile(r"^\| `([^`]+\.py)` \| ([^|]+) \|", re.MULTILINE)  # | `doomnet/model.py` | learned | ...
 
 # README.md carries a block quote that starts with these words for as long as agent.py is the
-# template's placeholder. It discloses that the rest of the README describes an agent not yet there.
+# template's random baseline. It says that agent.py does not run the modules of doomnet/ yet.
 STATUS_NOTE = "Status of `agent.py`"
 
 # (words in README.md, the fact about agent.py that must hold when the words are there, what is missing if it does not)
+# Checked once agent.py imports the networks. The first five also describe modules of doomnet/, which
+# exist before the agent is assembled; the last three can only be about agent.py (AGENT_ONLY).
 README_CLAIMS = (
     ("`PolicyNet`", "networks", "does not import doomnet.model"),
     ("exit detector", "networks", "does not import doomnet.model"),
@@ -365,6 +389,11 @@ README_CLAIMS = (
     ("time governor", "clock", "never reads a clock (time.perf_counter() or the like)"),
     ("exception handler", "handler", "has no try/except in DoomAgent.act"),
 )
+AGENT_ONLY = ("loads the weights", "time governor", "exception handler")
+# Names the README cites in code quotes must exist in the code, so that a renamed constant or
+# weights file cannot leave a stale sentence behind.
+CITED_CONSTANT = re.compile(r"`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)(?:=[^`]*)?`")  # `GOVERNOR_NETWORK_MS`, `DOOMNET_ALLOW_UNTRAINED=1`
+CITED_WEIGHTS = re.compile(r"`weights/([\w.-]+)`")                             # `weights/policy.pt`
 
 CLOCKS = {"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns", "process_time", "process_time_ns", "time", "time_ns"}
 
@@ -398,7 +427,14 @@ def agent_facts(agent_py: Path) -> dict[str, bool]:
 
 
 def readme_problems(folder: Path) -> list[Hit]:
-    """Where README.md and agent.py under `folder` disagree about what the agent does."""
+    """Where README.md and agent.py under `folder` disagree about what the agent does.
+
+    Two states are consistent. Baseline: agent.py does not import doomnet.model, and the README has
+    the status note, labels the agent.py row "placeholder" and claims none of AGENT_ONLY. Assembled:
+    agent.py imports doomnet.model, the note and the placeholder label are gone, every claim of
+    README_CLAIMS that the README makes holds for the file, and the constants and weights files
+    cited in code quotes exist in the code.
+    """
     readme = folder / "README.md"
     rel = readme.relative_to(folder.parent).as_posix()
     text = readme.read_text()
@@ -411,23 +447,41 @@ def readme_problems(folder: Path) -> list[Hit]:
 
     facts = agent_facts(folder / "agent.py")
     note = line_of(STATUS_NOTE)
-    if not facts["networks"]:  # agent.py is still the template's placeholder
-        if note:
-            return []
-        return [Hit(rel, line_of("`agent.py`") or 1,
-                    "agent.py does not load the networks of doomnet/model.py yet, and README.md describes the assembled agent "
-                    f"without saying so: it needs the block quote that starts with '> **{STATUS_NOTE}.**' until agent.py is replaced")]
+    row = next((i for i, line in enumerate(lines, 1) if line.startswith("| `agent.py` |")), 0)
+    labels = {label.strip() for label in lines[row - 1].split("|")[2].split(",")} if row else set()
     hits = []
+    if not facts["networks"]:  # agent.py is still the template's random baseline
+        if not note:
+            hits.append(Hit(rel, row or 1, "agent.py does not run the networks of doomnet/model.py yet and README.md does not say so: "
+                                           f"it needs the block quote that starts with '> **{STATUS_NOTE}.**' until agent.py is replaced"))
+        if row and labels != {PLACEHOLDER}:
+            hits.append(Hit(rel, row, f"agent.py is still the template's random baseline, but its row is labelled {sorted(labels)}: "
+                                      f"label it '{PLACEHOLDER}' and describe the file as it is"))
+        hits += [Hit(rel, line_of(words), f"README.md says '{words}', but agent.py is still the template's random baseline")
+                 for words in AGENT_ONLY if line_of(words)]
+        return hits
     if note:
         last = note
         while last < len(lines) and lines[last].startswith(">"):  # the block quote runs on while lines start with ">"
             last += 1
-        hits.append(Hit(rel, note, f"agent.py now loads the networks, so the note that calls it a placeholder is wrong: "
-                                   f"delete lines {note} to {last} of README.md, then check the sentences about agent.py against the file"))
+        hits.append(Hit(rel, note, f"agent.py now runs the networks, so the note that calls it a baseline is wrong: "
+                                   f"delete lines {note} to {last} of README.md, then write what agent.py does from the file itself"))
+    if PLACEHOLDER in labels:
+        hits.append(Hit(rel, row, f"agent.py now runs the networks, so its row cannot be labelled '{PLACEHOLDER}': label it "
+                                  "'learned' and say what the file does (what it loads, what it runs per decision, how heads become buttons)"))
     for words, fact, missing in README_CLAIMS:
         line = line_of(words)
         if line and not facts[fact]:
             hits.append(Hit(rel, line, f"README.md says '{words}', but agent.py {missing}"))
+    agent_source = (folder / "agent.py").read_text()
+    sources = "\n".join(p.read_text() for p in submission_files(folder) if p.suffix == ".py")
+    for number, line in enumerate(lines, 1):
+        for name in CITED_CONSTANT.findall(line):
+            if not re.search(rf"\b{name}\b", sources):
+                hits.append(Hit(rel, number, f"README.md cites '{name}', which no Python file under {folder.name}/ contains"))
+        for name in CITED_WEIGHTS.findall(line):
+            if f'"{name}"' not in agent_source and f"'{name}'" not in agent_source:
+                hits.append(Hit(rel, number, f"README.md cites the weights file '{name}', which agent.py does not name"))
     return hits
 
 
@@ -509,11 +563,13 @@ def test_readme_labels_every_module():
     assert set(rows) == modules, (f"submission/README.md must have one table row per module: "
                                   f"not listed {sorted(modules - set(rows))}, listed but absent {sorted(set(rows) - modules)}")
     for path, labels in rows.items():
+        if path == "agent.py" and labels == {PLACEHOLDER}:
+            continue  # allowed only while agent.py is the template's baseline; test_readme_agrees_with_agent_py decides that
         assert labels and labels <= LABELS, f"submission/README.md labels {path} as {sorted(labels)}; allowed: {sorted(LABELS)}"
 
 
 def test_readme_agrees_with_agent_py():
-    """The README neither describes an agent that is not in the tree nor calls the assembled agent a placeholder."""
+    """The README neither describes an agent that is not in the tree nor calls the assembled agent a baseline."""
     fail_if(readme_problems(SUBMISSION), "submission/README.md and submission/agent.py disagree")
 
 
@@ -593,6 +649,11 @@ NAME_PLANTS = [
     ("doomnet/plan.py", "order = runDfs(root)", "dfs"),
     ("doomnet/aim.py", "yaw = math.atan(dy / dx)", "atan"),
     ("doomnet/aim.py", "yaw = np.arctan(dy / dx)", "arctan"),
+    ("doomnet/aim.py", "yaw = np.arcsin(sin_rel)", "arcsin"),
+    ("doomnet/aim.py", "yaw = math.asin(sin_rel)", "asin"),
+    ("doomnet/aim.py", "yaw = np.arccos(cos_rel)", "arccos"),
+    ("doomnet/aim.py", "yaw = torch.acos(cos_rel)", "acos"),
+    ("doomnet/aim.py", "import cmath", "cmath"),
     ("doomnet/plan.py", "queue = [start]", "queue"),
     ("doomnet/plan.py", "enqueue(cell)", "queue"),
     ("doomnet/plan.py", "frontier = [goal]", "frontier"),
@@ -673,6 +734,15 @@ CODE_PLANTS = [
     ("from torch import cuda", "GPU interface"),
     ("import torch.cuda", "GPU interface"),
     ("os.system('ls')", "os.system"),
+    ("import os as o; o.system('ls')", "os.system"),
+    ("ctx = torch.multiprocessing.get_context('spawn')", "'.multiprocessing'"),
+    ("import torch.multiprocessing as mp", "'multiprocessing' interface"),
+    ("from torch import hub", "'hub' interface"),
+    ("w = torch.hub.load_state_dict_from_url(url)", "'.hub'"),
+    # --- the angle of a complex number: the banned inverse tangent without its name
+    ("yaw = np.angle(dx + 1j * dy)", ".angle()"),
+    ("yaw = torch.angle(torch.complex(dx, dy))", ".angle()"),
+    ("yaw = phases.phase(complex(dx, dy))", ".phase()"),
     ("from os import popen", "starts another process"),
     ("def broken(:", "cannot be parsed"),
     # --- search structure: none of these lines contains a banned name
@@ -842,6 +912,8 @@ from .model import PolicyNet
 meta_start, a_start, beta_start, data_start, pdfs, restart = 1, 2, 3, 4, 5, 6   # short names inside longer words
 A_START, A_END, DATA_START, ATANH_CLIP = 0.1, 0.9, 0, 0.999                     # upper-case constants
 tanh_inverse = torch.atanh(torch.zeros(1)) + np.arctanh(0.0)                    # hyperbolic, not the banned one
+sinh_inverse = torch.asinh(torch.zeros(1)) + np.arccosh(1.0)                    # hyperbolic as well
+increasing, basin, angle, phase = 1, 2, 3, 4                                    # words and plain names, not calls
 incr_count = scr_w = 0
 A = B = np.eye(2)
 product = A * B + A*B + A**2 + np.stack([A, *[B]])                              # a matrix named A, not the search
@@ -933,10 +1005,14 @@ from doomnet.model import ExitDetector, PolicyNet
 from doomnet.odometry import Odometry
 
 
+GOVERNOR_NETWORK_MS = 32.0
+POLICY_FILE = "policy.pt"
+
+
 class DoomAgent:
     def __init__(self, observation_space, action_space, device):
         self.policy = PolicyNet()
-        self.policy.load_state_dict(torch.load("weights/policy.pt", map_location="cpu"))
+        self.policy.load_state_dict(torch.load("weights/" + POLICY_FILE, map_location="cpu"))
 
     def reset(self):
         pass
@@ -951,19 +1027,36 @@ class DoomAgent:
         return action
 '''
 
-NOTE = f"> **{STATUS_NOTE}.** The file in the tree is still the template's placeholder.\n> It presses random buttons.\n"
+NOTE = f"> **{STATUS_NOTE}.** The file in the tree is still the template's baseline.\n> It presses random buttons.\n"
 
+# Two READMEs written for these tests, so that they do not depend on which of the two states the
+# real README is in. Lines 3 and 4 of the first are the status note; the table rows follow.
+BASELINE_README = f"""# The agent
 
-def readme_without_note() -> str:
-    """The text of the real submission/README.md, minus the status note if it is (still) there."""
-    lines = (SUBMISSION / "README.md").read_text().split("\n")
-    start = next((i for i, line in enumerate(lines) if STATUS_NOTE in line), None)
-    if start is None:
-        return "\n".join(lines)
-    end = start
-    while end < len(lines) and lines[end].startswith(">"):
-        end += 1
-    return "\n".join(lines[:start] + lines[end:])
+{NOTE}
+| Module | Label | What it does |
+|---|---|---|
+| `doomnet/odometry.py` | observation encoding | Odometry: the pose estimate. |
+| `doomnet/memory.py` | observation encoding | The memory map. |
+| `doomnet/encode.py` | observation encoding | The encoder of one observation. |
+| `doomnet/model.py` | learned | `PolicyNet` and the exit detector. |
+| `agent.py` | placeholder | Random buttons; no file is read from `weights/`. |
+"""
+
+ASSEMBLED_README = """# The agent
+
+| Module | Label | What it does |
+|---|---|---|
+| `doomnet/odometry.py` | observation encoding | Odometry: the pose estimate. |
+| `doomnet/memory.py` | observation encoding | The memory map. |
+| `doomnet/encode.py` | observation encoding | The encoder of one observation. |
+| `doomnet/model.py` | learned | `PolicyNet` and the exit detector. |
+| `agent.py` | learned | Loads the weights, then runs the modules above on every decision. |
+
+A time governor follows the running mean of `act()` time (`GOVERNOR_NETWORK_MS`). An exception
+handler returns no buttons for a decision on which an internal error occurred.
+The parameters are in `weights/policy.pt`.
+"""
 
 
 def readme_case(tmp_path: Path, readme: str, agent: str) -> list[Hit]:
@@ -975,39 +1068,68 @@ def readme_case(tmp_path: Path, readme: str, agent: str) -> list[Hit]:
     return readme_problems(folder)
 
 
-def test_readme_must_disclose_a_placeholder_agent(tmp_path):
-    """While agent.py is the template, a README that describes the assembled agent needs the status note."""
-    readme = readme_without_note()
-    assert "`PolicyNet`" in readme and "time governor" in readme and "exception handler" in readme
-    hits = readme_case(tmp_path, readme, TEMPLATE_AGENT)
-    assert len(hits) == 1 and "does not load the networks" in hits[0].what, hits
-    assert readme.split("\n")[hits[0].line - 1].count("`agent.py`"), "the hit points at a line about agent.py"
-    with pytest.raises(pytest.fail.Exception, match=r"submission/README\.md:\d+: agent\.py does not load"):
+def line_with(readme: str, words: str) -> int:
+    """1-based number of the first line of `readme` that contains `words`."""
+    return next(i for i, line in enumerate(readme.split("\n"), 1) if words in line)
+
+
+def test_the_two_consistent_states_pass(tmp_path):
+    """A README that calls the baseline a baseline, and one that describes an agent that has every part it names."""
+    assert readme_case(tmp_path / "baseline", BASELINE_README, TEMPLATE_AGENT) == []
+    assert readme_case(tmp_path / "assembled", ASSEMBLED_README, ASSEMBLED_AGENT) == []
+
+
+def test_readme_must_not_describe_an_agent_that_is_not_there(tmp_path):
+    """While agent.py is the template's baseline: the README of the assembled agent is rejected, at the
+    lines that make the claims, and so is each single step towards it."""
+    row = line_with(ASSEMBLED_README, "| `agent.py` |")
+    hits = readme_case(tmp_path / "all", ASSEMBLED_README, TEMPLATE_AGENT)
+    assert {h.path for h in hits} == {"submission/README.md"}
+    found = {(h.line, h.what.split(":")[0].split(",")[0]) for h in hits}
+    assert found == {
+        (row, "agent.py does not run the networks of doomnet/model.py yet and README.md does not say so"),
+        (row, "agent.py is still the template's random baseline"),
+        (row, "README.md says 'loads the weights'"),
+        (line_with(ASSEMBLED_README, "time governor"), "README.md says 'time governor'"),
+        (line_with(ASSEMBLED_README, "An exception"), "README.md says 'exception handler'"),
+    }, hits
+    with pytest.raises(pytest.fail.Exception, match=rf"submission/README\.md:{row}: agent\.py does not run the networks"):
         fail_if(hits, "planted")
 
+    no_note = BASELINE_README.replace(NOTE, "")
+    hits = readme_case(tmp_path / "no_note", no_note, TEMPLATE_AGENT)
+    assert len(hits) == 1 and "does not say so" in hits[0].what and "`agent.py`" in no_note.split("\n")[hits[0].line - 1], hits
 
-def test_readme_with_the_note_passes_while_the_agent_is_a_placeholder(tmp_path):
-    assert readme_case(tmp_path, NOTE + "\n" + readme_without_note(), TEMPLATE_AGENT) == []
+    relabelled = BASELINE_README.replace("| `agent.py` | placeholder |", "| `agent.py` | learned |")
+    hits = readme_case(tmp_path / "label", relabelled, TEMPLATE_AGENT)
+    assert [(h.line, "label it 'placeholder'" in h.what) for h in hits] == [(line_with(relabelled, "| `agent.py` |"), True)], hits
+
+    for words in AGENT_ONLY:
+        claimed = BASELINE_README + f"\nThe agent has this part: {words}.\n"
+        hits = readme_case(tmp_path / words.replace(" ", "_"), claimed, TEMPLATE_AGENT)
+        assert [(h.line, f"says '{words}'" in h.what) for h in hits] == [(line_with(claimed, "The agent has this part"), True)], hits
 
 
-def test_readme_note_must_go_once_the_agent_is_assembled(tmp_path):
-    """The opposite direction: the real agent must not be described as a random placeholder."""
-    hits = readme_case(tmp_path, "# Title\n\n" + NOTE + "\n" + readme_without_note(), ASSEMBLED_AGENT)
-    assert [(h.path, h.line) for h in hits] == [("submission/README.md", 3)], hits
-    assert "delete lines 3 to 4" in hits[0].what
+def test_readme_must_not_call_the_assembled_agent_a_baseline(tmp_path):
+    """The opposite direction: once agent.py runs the networks, the note and the placeholder label must go."""
+    hits = readme_case(tmp_path / "stale", BASELINE_README, ASSEMBLED_AGENT)
+    row = line_with(BASELINE_README, "| `agent.py` |")
+    assert [(h.path, h.line) for h in sorted(hits)] == [("submission/README.md", 3), ("submission/README.md", row)], hits
+    assert "delete lines 3 to 4" in sorted(hits)[0].what and "label it 'learned'" in sorted(hits)[1].what
+
+    with_note = ASSEMBLED_README.replace("# The agent\n\n", "# The agent\n\n" + NOTE + "\n")
+    hits = readme_case(tmp_path / "note", with_note, ASSEMBLED_AGENT)
+    assert [(h.line, "delete lines 3 to 4" in h.what) for h in hits] == [(3, True)], hits
 
 
 def test_readme_claims_are_checked_against_the_assembled_agent(tmp_path):
-    """Our README without the note passes against an agent that has every part it describes,
-    and each part taken out of the agent is reported at the README line that claims it."""
-    readme = readme_without_note()
-    assert readme_case(tmp_path / "full", readme, ASSEMBLED_AGENT) == []
+    """Each part taken out of the assembled agent is reported at the README line that claims it."""
     removed = {
         "time governor": ASSEMBLED_AGENT.replace("time.perf_counter()", "0.0"),
         "exception handler": ASSEMBLED_AGENT.replace("        try:\n            action = self.step(observation)\n        except Exception:\n"
                                                      "            action = np.zeros(spec.NUM_BUTTONS, np.int8)\n",
                                                      "        action = self.step(observation)\n"),
-        "loads the weights": ASSEMBLED_AGENT.replace('        self.policy.load_state_dict(torch.load("weights/policy.pt", map_location="cpu"))\n', ""),
+        "loads the weights": ASSEMBLED_AGENT.replace('        self.policy.load_state_dict(torch.load("weights/" + POLICY_FILE, map_location="cpu"))\n', ""),
         "odometry": ASSEMBLED_AGENT.replace("from doomnet.odometry import Odometry\n", ""),
         "memory map": ASSEMBLED_AGENT.replace("from doomnet.memory import MemoryMap\n", ""),
         "encoder": ASSEMBLED_AGENT.replace("from doomnet.encode import Encoder\n", ""),
@@ -1015,9 +1137,33 @@ def test_readme_claims_are_checked_against_the_assembled_agent(tmp_path):
     for words, agent in removed.items():
         assert agent != ASSEMBLED_AGENT, words
         ast.parse(agent)
-        hits = readme_case(tmp_path / words.replace(" ", "_"), readme, agent)
+        hits = readme_case(tmp_path / words.replace(" ", "_"), ASSEMBLED_README, agent)
         assert len(hits) == 1 and f"says '{words}'" in hits[0].what, (words, hits)
-        assert words.split()[0].lower() in readme.split("\n")[hits[0].line - 1].lower(), (words, hits)
+        assert words.split()[0].lower() in ASSEMBLED_README.split("\n")[hits[0].line - 1].lower(), (words, hits)
+    renamed = {
+        "cites 'GOVERNOR_NETWORK_MS'": ASSEMBLED_AGENT.replace("GOVERNOR_NETWORK_MS", "SLOW_MS"),
+        "cites the weights file 'policy.pt'": ASSEMBLED_AGENT.replace('"policy.pt"', '"net.pt"'),
+    }
+    for i, (message, agent) in enumerate(renamed.items()):
+        assert agent != ASSEMBLED_AGENT, message
+        hits = readme_case(tmp_path / f"renamed{i}", ASSEMBLED_README, agent)
+        assert len(hits) == 1 and message in hits[0].what, (message, hits)
+        assert message.split("'")[1] in ASSEMBLED_README.split("\n")[hits[0].line - 1], (message, hits)
+
+
+def test_the_real_readme_is_in_the_state_of_the_real_agent():
+    """Whichever state agent.py is in, the real README must be in the same one and say so in its table."""
+    facts = agent_facts(SUBMISSION / "agent.py")
+    text = (SUBMISSION / "README.md").read_text()
+    rows = dict(README_ROW.findall(text))
+    assert "agent.py" in rows, "submission/README.md has no table row for agent.py"
+    labels = {label.strip() for label in rows["agent.py"].split(",")}
+    if facts["networks"]:
+        assert "learned" in labels and STATUS_NOTE not in text, f"agent.py runs the networks; its row is labelled {sorted(labels)}"
+        for words in AGENT_ONLY:  # the three things a reader needs to know about the assembled agent
+            assert re.search(r"\s+".join(words.split()), text, re.IGNORECASE), f"submission/README.md does not say '{words}'"
+    else:
+        assert labels == {PLACEHOLDER} and STATUS_NOTE in text, f"agent.py is the template's baseline; its row is labelled {sorted(labels)}"
 
 
 # ---- secrets ------------------------------------------------------------------------------------

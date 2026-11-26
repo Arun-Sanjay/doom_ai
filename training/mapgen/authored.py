@@ -42,9 +42,12 @@ between symbols, short rows padded with wall) and then checked, in this order:
           two colours in tier 4, and locks that cannot be bypassed; exit far enough from the
           start; more than one plain room; monsters within the tier's range
   time    the tick cap is chosen by `layouts.tick_cap`, which refuses a route too long for 4200 tics
-  copies  a map is dropped if another accepted map, a map of the frozen suites, a map of a file
-          named with --exclude (the training manifest) or an example of the prompt has the same
-          walls, doors, start and exit up to rotation and mirror (things and lock colours ignored)
+  copies  a map is dropped as a near-duplicate if another accepted map, a map of the frozen suites,
+          a map of a file named with --exclude (the training manifest) or an example of the prompt
+          has the same walls, doors, start and exit up to rotation and mirror (things and lock
+          colours ignored), or differs from it in less than 5% of the cells; for that count a side
+          may be one cell longer or shorter, the extra row or column being left out where it fits
+          best. Arenas (tier 1) are counted cell by cell against the maps of this suite only
   engine  `cli.verify_map`: the map loads in `doom_env`, random play raises no warning and, on a
           copy without monsters, the reference walker reaches the exit within 60% of the tick cap
           (skipped with --no-engine-check)
@@ -56,7 +59,7 @@ Suite rows
 `name, tier, seed, episode_ticks, style, exit_style, grid, options, counts` as in the frozen suites
 (so `training.evaluate` and `training.mapgen.cli --stats / --verify / --from-suite` read the file),
 plus `source`, `model`, `temperature`, `brief`, `hash` (SHA-1 of the grid) and `layout` (the
-near-duplicate key). `style` is the name of the plan style asked for, `options` is empty (the
+key shared by copies). `style` is the name of the plan style asked for, `options` is empty (the
 reference dialect), and `seed` is 32 bits of the grid hash: an authored map has no generator seed.
 An existing suite file is never overwritten; `--resume` adds maps to it.
 """
@@ -79,6 +82,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
+
 from . import cli, layouts, udmf
 from .solver import solve
 
@@ -93,6 +98,8 @@ SIZE_SLACK = 4               # cells by which a side may exceed the tier's size 
 WALKER_SHARE = 0.6           # share of the tick cap the reference walker may use (the bound of the generator's tests)
 THROTTLE_WAVES = 5           # waves in a row that may be answered with HTTP 429 before the run stops
 WALK_CELLS, WALK_DOORS = 70, 7    # route length the prompt asks for: within the largest tick cap at walking speed
+NEAR_SHARE = 0.05            # a map that differs from a known layout in a smaller share of its cells is a near-duplicate
+SUITE_ONLY_TIERS = (1,)      # tiers whose maps are compared cell by cell with the maps of this suite only (see Layouts)
 WALL = udmf.WALL
 TIERS = (1, 2, 3, 4)
 
@@ -393,25 +400,136 @@ def doors_met_before_key(g: layouts.Grid, start) -> int:
     return met
 
 
-def layout_key(grid: str) -> str:
-    """Hash that is the same for near-duplicates.
-
-    Two maps share a key when their walls, doors, start and exit coincide after some rotation or
-    mirror. Things (monsters, keys, pickups) are left out and a locked door counts as one symbol
-    whatever its colour, so "the same grid rotated or mirrored" and "the same grid with other
-    things on it" both give the same key.
-    """
+def plan(grid: str) -> list[str]:
+    """The structure of a grid, row by row: wall, floor, door (D), locked door (L), start and exit.
+    Things (monsters, keys, pickups) become floor and a locked door is one symbol whatever its colour."""
     def plain(ch: str) -> str:
         sym = udmf.LEGEND[ch]
         if sym.kind == "door":
             return "L" if sym.lock else "D"
         return "." if sym.kind in ("floor", "thing") else ch
-    rows = ["".join(plain(ch) for ch in row) for row in udmf.parse_grid(grid)]
+    return ["".join(plain(ch) for ch in row) for row in udmf.parse_grid(grid)]
+
+
+def layout_key(grid: str) -> str:
+    """Hash that is the same for copies of a layout.
+
+    Two maps share a key when their walls, doors, start and exit coincide after some rotation or
+    mirror (`plan`), so "the same grid rotated or mirrored" and "the same grid with other things on
+    it" both give the same key. A map that differs in a single cell has another key: variations
+    are found by `Layouts.distance`.
+    """
+    rows = plan(grid)
     forms = []
     for _ in range(4):
         rows = ["".join(col) for col in zip(*rows[::-1])]          # quarter turn
         forms += ["\n".join(rows), "\n".join(row[::-1] for row in rows)]
     return hashlib.sha1(min(forms).encode()).hexdigest()
+
+
+def _plan_array(grid: str) -> np.ndarray:
+    """`plan(grid)` as a (rows, columns) array of character codes, cropped to the open cells plus
+    one cell of wall (the form `examine` returns and the generator writes)."""
+    cells = np.array([list(row.encode()) for row in plan(grid)], dtype=np.uint8)
+    rows, cols = np.nonzero(cells != ord(WALL))
+    if not len(rows):
+        raise ValueError("a grid without an open cell has no layout")
+    cells = np.pad(cells, 1, constant_values=ord(WALL))
+    return np.ascontiguousarray(cells[rows.min():rows.max() + 3, cols.min():cols.max() + 3])
+
+
+def _fewest_differences(a: np.ndarray, stack: np.ndarray) -> np.ndarray:
+    """Smallest number of cells in which plan `a` (h, w) differs from each plan of `stack` (n, h', w').
+
+    The sides may differ by one cell: the longer side then loses one row or column, whichever one
+    makes the rest agree best, so a plan and the same plan with a row or a column doubled or
+    removed anywhere differ in no cell. With the row left out at index i and the column at j, the
+    cells before them are compared in place and the cells after them one step along; the four
+    quarters of that sum are read from cumulative sums, for every (i, j) at once.
+    """
+    n, h, w = len(stack), min(a.shape[0], stack.shape[1]), min(a.shape[1], stack.shape[2])
+    tall, wide = a.shape[0] - stack.shape[1], a.shape[1] - stack.shape[2]          # each -1, 0 or 1
+    total = np.zeros((n, h + 1, w + 1), dtype=np.int32)       # [k, i, j]: differing cells with row i and column j left out
+    for down in range(2 if tall else 1):
+        for along in range(2 if wide else 1):
+            x = a[down * (tall > 0):, along * (wide > 0):][:h, :w]
+            y = stack[:, down * (tall < 0):, along * (wide < 0):][:, :h, :w]
+            part = np.zeros_like(total)
+            part[:, 1:, 1:] = (y != x).cumsum(axis=1, dtype=np.int32).cumsum(axis=2, dtype=np.int32)
+            if down:
+                part = part[:, -1:, :] - part              # rows from i on
+            if along:
+                part = part[:, :, -1:] - part              # columns from j on
+            total += part
+    if not tall:
+        total = total[:, -1:, :]                           # no row to leave out: all rows compared in place
+    if not wide:
+        total = total[:, :, -1:]
+    return total.reshape(n, -1).min(axis=1)
+
+
+class Layouts(set):
+    """The layouts a new map has to differ from: known maps, and the maps accepted so far.
+
+    A set of `layout_key` values that also holds the plans of the grids given to `add_grid`, for
+    two tests. `key in layouts` is the test for copies. For variations, `distance(grid)` is the
+    smallest share of cells in which the plan of the grid differs from the plan of a known map,
+    over the eight rotations and mirrors, among the known maps whose sides are at most one cell
+    longer or shorter (`_fewest_differences`); a map closer than NEAR_SHARE to a known one is a
+    near-duplicate (`repeats`). Maps of other sizes are not compared: a variation that grows by
+    two rows or more is not found. A key put in without its grid (`add`) is tested as a copy only.
+
+    NEAR_SHARE was set on generated maps, which are not variations of each other. Among the 1975
+    layouts of the frozen suites and a training manifest of 1500 maps, the nearest other layout is
+    closer than 5% for 0.7 to 2.4% of the maps of tiers 2, 3 and 4 (closer than 8% for 3 to 8%), so
+    the test costs few maps there. Arenas are another matter: an open room with a few pillars has
+    so little structure that 55% of the generated tier 1 maps are within 5% of another one. That is
+    why `collect` compares a map of SUITE_ONLY_TIERS cell by cell with the maps of its own suite
+    only (of generated arenas filling a suite of 40, 8.5% were turned away) and with all other known
+    maps as a copy only.
+    """
+
+    def __init__(self, keys=()):
+        super().__init__(keys)
+        self._stored: set[str] = set()                        # keys whose plan is held below
+        self._plans: dict[tuple[int, int], list] = {}         # (rows, columns) -> plans of that size
+        self._stacks: dict[tuple[int, int], np.ndarray] = {}  # the same as one array per size, built when needed
+
+    def copy(self) -> "Layouts":
+        other = Layouts(self)
+        other._stored = set(self._stored)
+        other._plans = {shape: list(plans) for shape, plans in self._plans.items()}
+        return other
+
+    def add_grid(self, grid: str) -> None:
+        """Make a grid known. Raises ValueError if the text is not a grid of the legend."""
+        cells = _plan_array(grid)
+        key = layout_key(grid)
+        if key not in self._stored:                           # a turned or mirrored copy adds nothing: `distance` turns the grid
+            self._plans.setdefault(cells.shape, []).append(cells)
+            self._stacks.pop(cells.shape, None)
+            self._stored.add(key)
+        self.add(key)
+
+    def distance(self, grid: str) -> float:
+        """Smallest share of differing cells between this grid and a known one; 1.0 if none has its size."""
+        cells = _plan_array(grid)
+        best = 1.0
+        for turn in range(4):
+            for form in (np.rot90(cells, turn), np.rot90(cells, turn)[:, ::-1]):
+                h, w = form.shape
+                for shape in [(h + dh, w + dw) for dh in (-1, 0, 1) for dw in (-1, 0, 1)]:
+                    if shape not in self._plans:
+                        continue
+                    if shape not in self._stacks:
+                        self._stacks[shape] = np.stack(self._plans[shape])
+                    fewest = int(_fewest_differences(form, self._stacks[shape]).min())
+                    best = min(best, fewest / (min(h, shape[0]) * min(w, shape[1])))
+        return best
+
+    def repeats(self, grid: str) -> bool:
+        """Is this grid a copy or a variation of a known layout?"""
+        return layout_key(grid) in self or self.distance(grid) < NEAR_SHARE
 
 
 def examine(lines: list[str], tier: int, seed: int = 0) -> dict:
@@ -512,19 +630,19 @@ def suite_row(found: dict, name: str, request: Request) -> dict:
     return row
 
 
-def known_layouts(paths) -> set[str]:
-    """Near-duplicate keys of every grid in the given suite or manifest files."""
-    keys = set()
+def known_layouts(paths) -> Layouts:
+    """The layouts of every grid in the given suite or manifest files."""
+    known = Layouts()
     for path in paths:
         for row in cli.read_rows(path):
             grid = row.get("grid")
             if isinstance(grid, list):
                 grid = "\n".join(grid)
             try:
-                keys.add(layout_key(grid))
+                known.add_grid(grid)
             except (ValueError, AttributeError, TypeError):      # no grid, or not a grid of this legend: nothing to compare
                 continue
-    return keys
+    return known
 
 
 # ---- clients ----------------------------------------------------------------------------------------
@@ -960,7 +1078,8 @@ def collect(client, *, tiers=TIERS, per_tier: int = 40, models=(DEFAULT_MODEL,),
     """Ask for maps until every tier has `per_tier` accepted ones or `max_requests` requests are spent.
 
     `rows` are the maps already in the suite (kept, counted towards the targets and never repeated)
-    and `taken` holds further near-duplicate keys to avoid. Requests go out in waves of up to
+    and `taken` holds the other layouts to avoid: a `Layouts` (see `known_layouts`), or bare
+    `layout_key` values, which can only be tested as copies. Requests go out in waves of up to
     `concurrency`; each request goes to the tier that is furthest from its target (of several, the
     one asked least so far), so the tiers fill evenly and a run that ends at the cap is balanced.
     Replies are handled in the order the requests were planned, so a run is reproducible for given replies.
@@ -971,8 +1090,12 @@ def collect(client, *, tiers=TIERS, per_tier: int = 40, models=(DEFAULT_MODEL,),
     Returns (all suite rows, statistics).
     """
     rows = list(rows)
-    taken = set(taken) | {row.get("layout") or layout_key(row["grid"]) for row in rows}
-    taken |= {layout_key(grid) for grid in EXAMPLES}       # an example of the prompt handed back is not a new map
+    known = taken.copy() if isinstance(taken, Layouts) else Layouts(taken)      # every layout that must not come again
+    own = Layouts()                                                              # those of this suite and of the prompt
+    known |= {row["layout"] for row in rows if row.get("layout")}
+    for grid in [row["grid"] for row in rows] + list(EXAMPLES):      # an example of the prompt handed back is not a new map
+        known.add_grid(grid)
+        own.add_grid(grid)
     stats = Stats(target=per_tier, cap=max_requests)
     stats.total.update({t: sum(row["tier"] == t for row in rows) for t in tiers})
     index = {t: _next_index(rows, stem, t) for t in tiers}
@@ -1041,7 +1164,7 @@ def collect(client, *, tiers=TIERS, per_tier: int = 40, models=(DEFAULT_MODEL,),
                     stats.count(request, "returned")
                     try:
                         found = examine(lines, tier, seed)
-                        if found["layout"] in taken:
+                        if found["layout"] in known or (own if tier in SUITE_ONLY_TIERS else known).repeats(found["grid"]):
                             raise Rejected("near-duplicate")
                     except Rejected as e:
                         stats.rejected[e.reason] += 1
@@ -1060,7 +1183,8 @@ def collect(client, *, tiers=TIERS, per_tier: int = 40, models=(DEFAULT_MODEL,),
                         except Rejected as e:
                             stats.rejected[e.reason] += 1
                             continue
-                    taken.add(found["layout"])
+                    known.add_grid(found["grid"])
+                    own.add_grid(found["grid"])
                     rows.append(row)
                     index[tier] += 1
                     got += 1

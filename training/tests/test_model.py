@@ -5,7 +5,11 @@ Run: .venv/bin/python -m pytest training/tests/test_model.py -q
 
 from __future__ import annotations
 
+import importlib
 import math
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -389,6 +393,50 @@ def test_controller_reads_the_field_at_its_current_position(net):
     assert torch.allclose(got, expected, atol=1e-3)
 
 
+def test_goal_read_is_linear_in_the_value_field(net):
+    """Nothing else in the field may shrink the part of the patch that depends on the target.
+
+    A per-sample normalisation of the patch (dividing by its own size) fails this: a pattern that
+    all rows share then squeezes the differences between rows, which silenced the goal channel
+    early in training for some seeds. The read is differences to the agent's own cell times a constant.
+    """
+    g = torch.Generator().manual_seed(4)
+    fields = torch.randn(6, 1, spec.CROP_SIZE, spec.CROP_SIZE, generator=g) * 0.1         # the part that differs between rows
+    common = (torch.randn(1, 1, spec.CROP_SIZE, spec.CROP_SIZE, generator=g) * 30.0).expand_as(fields)   # shared, 300 times larger
+    pos = CENTER + torch.rand(6, 2, generator=g) - 0.5
+    theta = torch.rand(6, 1, generator=g) * 2 * math.pi
+    read = lambda f: net._goal_patch(f, pos, torch.sin(theta), torch.cos(theta))           # noqa: E731
+    with torch.inference_mode():
+        alone = read(fields)
+        assert alone.shape == (6, 81) and float(alone[:, 40].abs().max()) == 0.0           # differences to the agent's own cell
+        assert torch.allclose(read(fields + common) - read(common), alone, atol=2e-3)      # the shared part does not attenuate it
+        assert torch.allclose(read(3.0 * fields), 3.0 * alone, atol=1e-4)                  # no normalisation by the patch's own size
+        assert torch.allclose(read(fields + 7.0), alone, atol=1e-3)                        # the level of the field carries nothing
+        plain = net.ego(fields, pos, torch.sin(theta), torch.cos(theta)).flatten(1)
+        assert torch.allclose(alone, (plain - plain[:, 40:41]) * model.GOAL_GAIN, atol=1e-6)
+
+
+def test_goal_channel_stats_show_a_dead_channel(net):
+    """The numbers a training log needs to notice that the value field no longer reaches the controller."""
+    assert PolicyNet().goal_channel_stats() == {"goal_feat_std": 0.0, "goal_feat_alive": 0.0}   # before any forward pass
+    d = make_inputs(6)
+    with torch.inference_mode():
+        _, state = step(net, d, sample=False)
+        live = net.goal_channel_stats()
+        flat = {**state, "value_field": torch.zeros_like(state["value_field"])}            # a field with no shape at all
+        step(net, d, flat, run_manager=False)
+        dead = net.goal_channel_stats()
+        step(net, {k: v[:1] for k, v in d.items()}, sample=False)
+        single = net.goal_channel_stats()
+        sequence(net, make_inputs(2, 5, seed=3), sample=False)
+        seq = net.goal_channel_stats()
+    assert live["goal_feat_std"] > 0.05 and live["goal_feat_alive"] > 0.5
+    assert dead == {"goal_feat_std": 0.0, "goal_feat_alive": 0.0}
+    assert single["goal_feat_std"] == 0.0 and single["goal_feat_alive"] > 0.2             # one row: no spread to measure
+    assert seq["goal_feat_std"] > 0.05
+    assert "_goal_feat" not in net.state_dict()                                            # diagnostics only, never saved
+
+
 # ------------------------------------------------------------------------------------------ hierarchy and bottleneck
 
 def test_clamping_the_subgoal_changes_the_controller_logits(net):
@@ -637,7 +685,7 @@ def test_tiny_overfit_policy_memorises_a_batch():
     forced = {"subgoal": torch.randint(0, spec.NUM_SUBGOALS, (batch, seq), generator=g),
               "target": torch.randint(0, 4096, (batch, seq), generator=g)}
     returns = torch.randn(batch, seq, generator=g)
-    opt = torch.optim.Adam(small.parameters(), lr=3e-3)
+    opt = torch.optim.Adam(small.parameters(), lr=1e-3)
 
     def loss_fn():
         out, _ = sequence(small, d, forced=forced)
@@ -717,36 +765,77 @@ def _detour_batch(n: int, g: torch.Generator):
     return d, forced, torch.where(side > 0, 1, 2)                                          # strafe left / right
 
 
-@pytest.mark.slow
-def test_value_field_learns_a_detour_around_a_wall():
-    """Under the strict bottleneck the side of the gap can only reach the controller through the value field.
-
-    The sensors are blank and the target lies straight ahead behind the wall, so chance is 50%.
-    Open-floor rows teach the controller to follow the field; the wall rows then force the learned
-    value propagation to shape the field from the map.
-    """
-    torch.manual_seed(0)
-    small = PolicyNet()
-    assert small.strict
-    opt = torch.optim.Adam(small.parameters(), lr=1e-3)
-    g = torch.Generator().manual_seed(0)
-    for _ in range(220):
-        d, forced, label = _detour_batch(32, g)
-        out, _ = step(small, d, forced=forced)
-        loss = F.cross_entropy(out["logits"][spec.HEAD_STRAFE], label)
-        opt.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(small.parameters(), 5.0)
-        opt.step()
+def _detour_scores(small: PolicyNet) -> tuple[float, float, float]:
+    """Accuracy on held-out rows: open floor, wall, and the wall rows again with the wall removed from the map."""
     d, forced, label = _detour_batch(512, torch.Generator().manual_seed(99))
     with torch.inference_mode():
         out, _ = step(small, d, forced=forced)
         right = out["logits"][spec.HEAD_STRAFE].argmax(1) == label
         blind, _ = step(small, {**d, "map": _open_floor(512)}, forced=forced)               # same targets, wall removed
         blind_right = blind["logits"][spec.HEAD_STRAFE].argmax(1) == label
-    assert float(right[256:].float().mean()) > 0.95                                        # open floor: follows the target
-    assert float(right[:256].float().mean()) > 0.9                                         # wall: goes for the gap
-    assert float(blind_right[:256].float().mean()) < 0.7                                   # and it read that from the map
+    return float(right[256:].float().mean()), float(right[:256].float().mean()), float(blind_right[:256].float().mean())
+
+
+def _detour_training(seed: int, lr: float):
+    """A fresh default network and a function that trains it on the detour task for a number of updates of 32 rows."""
+    torch.manual_seed(seed)
+    small = PolicyNet()
+    assert small.strict
+    opt = torch.optim.Adam(small.parameters(), lr=lr)
+    g = torch.Generator().manual_seed(seed)
+
+    def train(updates: int) -> None:
+        for _ in range(updates):
+            d, forced, label = _detour_batch(32, g)
+            out, _ = step(small, d, forced=forced)
+            loss = F.cross_entropy(out["logits"][spec.HEAD_STRAFE], label)
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(small.parameters(), 5.0)
+            opt.step()
+
+    return small, train
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("seed", [0, 1, 3])
+def test_value_field_learns_a_detour_around_a_wall(seed):
+    """Under the strict bottleneck the side of the gap can only reach the controller through the value field.
+
+    The sensors are blank and the target lies straight ahead behind the wall, so chance is 50%.
+    Open-floor rows teach the controller to follow the field; the wall rows then force the learned
+    value propagation to shape the field from the map. Run for three seeds at the learning rate
+    training uses (3e-4). The update at which the wall is learned varies between seeds, so a
+    seed that has not met the thresholds after 220 updates gets 110 more.
+    """
+    small, train = _detour_training(seed, lr=3e-4)
+    history = []
+    for updates in (220, 110):
+        train(updates)
+        open_floor, wall, wall_removed = _detour_scores(small)
+        history.append((open_floor, wall, wall_removed))
+        # open floor: follows the target; wall: goes for the gap; and it read that from the map
+        if open_floor > 0.95 and wall > 0.9 and wall_removed < 0.7:
+            break
+    else:
+        pytest.fail(f"seed {seed}: (open floor, wall, wall removed) after 220 and 330 updates = {history}")
+
+
+@pytest.mark.slow
+def test_goal_channel_survives_a_high_learning_rate():
+    """At learning rate 1e-3 the value field must still reach the controller.
+
+    With the patch divided by its own size, this seed stayed at chance on every row of the detour
+    task, open floor included, however long it trained: a pattern shared by all rows grew in the
+    field and the division squeezed out the part that depends on the target. The open-floor rows
+    need nothing but that part, so they are the check; goal_channel_stats() must agree.
+    """
+    small, train = _detour_training(seed=1, lr=1e-3)
+    train(220)
+    open_floor, _, _ = _detour_scores(small)
+    stats = small.goal_channel_stats()                                                     # of the last scoring pass
+    assert open_floor > 0.95, (open_floor, stats)
+    assert stats["goal_feat_std"] > 0.1 and stats["goal_feat_alive"] > 0.5, stats
 
 
 # ------------------------------------------------------------------------------------------ exit detector
@@ -864,11 +953,52 @@ def test_step_latency_is_inside_the_budget():
     torch.set_num_threads(1)
     try:
         torch.manual_seed(0)
-        best, means = bench.repeat_steps(PolicyNet().eval(), ExitDetector().eval(), steps=420, repeats=3)
+        with bench.ThreadMeter() as meter:
+            best, means = bench.repeat_steps(PolicyNet().eval(), ExitDetector().eval(), steps=420, repeats=3)
     finally:
         torch.set_num_threads(before)
+    assert meter.result["single_threaded"], meter.result                                   # otherwise the figure means nothing
     assert min(means) <= bench.BUDGET_MS, means
     assert best["PolicyNet, manager steps"]["n"] == 53 and best["PolicyNet, other steps"]["n"] == 367
+
+
+def test_bench_pins_the_one_thread_variables_where_unset():
+    from training.bench import model_latency as bench
+    env = {"OMP_NUM_THREADS": "4", "HOME": "/x"}
+    assert bench.pin_one_thread_env(env) == {"OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1"}
+    assert env == {"OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "HOME": "/x"}
+    before = {name: os.environ.get(name) for name in bench.ONE_THREAD_ENV}
+    importlib.reload(bench)                                                                # importing it must not touch the environment
+    assert before == {name: os.environ.get(name) for name in bench.ONE_THREAD_ENV}
+
+
+def test_bench_thread_verdict():
+    """The verdict on recorded cases: one working thread passes, a pool behind a one-thread torch setting does not."""
+    from training.bench import model_latency as bench
+    one = bench.judge_threads(wall_s=6.0, cpu_s=5.9, grew=[5.9, 0.0, 0.01])
+    assert one["single_threaded"] and one["os_threads"] == 3 and one["busy_threads"] == 1
+    # a 15-thread pool under a one-CPU quota: CPU over wall stays at 1.0, only the per-thread times show it
+    pool = bench.judge_threads(wall_s=29.0, cpu_s=28.1, grew=[8.5] + [1.4] * 14 + [0.0] * 14)
+    assert not pool["single_threaded"] and pool["os_threads"] == 29 and pool["busy_threads"] == 15
+    assert not bench.judge_threads(wall_s=2.0, cpu_s=5.0)["single_threaded"]               # no per-thread times: CPU over wall decides
+    assert bench.judge_threads(wall_s=2.0, cpu_s=1.2)["single_threaded"]                   # a loaded machine: less than one CPU
+    with bench.ThreadMeter() as meter:
+        sum(i * i for i in range(200_000))
+    assert meter.result["single_threaded"] and meter.result["cpu_over_wall"] <= 1.1
+    assert {"quota_cpus", "periods", "throttled_periods"} <= meter.result.keys()
+
+
+def test_bench_script_runs_single_threaded():
+    """Run as a script with the thread variables unset: it sets them before torch loads and reports one working thread."""
+    env = {k: v for k, v in os.environ.items() if k not in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")}
+    script = Path(__file__).resolve().parents[1] / "bench" / "model_latency.py"
+    done = subprocess.run([sys.executable, str(script), "--steps", "105", "--repeats", "1", "--steps-only"],
+                          env=env, capture_output=True, text=True, timeout=300)
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1" in done.stdout
+    verdict = [line for line in done.stdout.splitlines() if line.strip().startswith("single-threaded")]
+    assert len(verdict) == 1 and verdict[0].split()[-1] == "yes", done.stdout[-2000:]
+    assert "NOT VALID" not in done.stdout
 
 
 def test_bench_helpers_run(net):

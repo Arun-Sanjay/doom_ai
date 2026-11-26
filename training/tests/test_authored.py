@@ -16,6 +16,7 @@ import urllib.request
 import urllib.response
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from training.mapgen import authored, cli, layouts, udmf
@@ -83,8 +84,9 @@ def snake(w: int = 21, h: int = 21) -> str:
 
 
 def arena(k: int) -> str:
-    """A valid tier 1 map; every k gives another layout."""
-    return box(8 + k, 7, (1, 1, "P"), (5, 4, "z"), (6, 2, "i"))
+    """A valid tier 1 map; every k gives another layout. The sides of two of them differ by two
+    cells or more (a room one cell wider or longer counts as a near-duplicate, see Layouts)."""
+    return box(8 + k, 7 + 2 * (k % 2), (1, 1, "P"), (5, 4, "z"), (6, 2, "i"))
 
 
 def fence(*grids: str) -> str:
@@ -260,7 +262,9 @@ def test_known_layouts_skips_what_it_cannot_read(tmp_path):
     path = tmp_path / "mixed.jsonl"
     path.write_text("\n".join(json.dumps(row) for row in (
         {"grid": A}, {"grid": lines(B)}, {"path": "somewhere.wad"}, {"grid": "#P?#"}, {"grid": "####"}, {"grid": 7})) + "\n")
-    assert authored.known_layouts([path]) == {authored.layout_key(A), authored.layout_key(B)}
+    known = authored.known_layouts([path])
+    assert known == {authored.layout_key(A), authored.layout_key(B)}
+    assert authored.layout_key(A) in known and known.distance(A) == 0.0
 
 
 def test_tidy_pads_short_rows_with_wall():
@@ -524,6 +528,159 @@ def test_layout_key_tells_different_plans_apart():
     assert authored.layout_key(put(grid, (2, 2, "."), (1, 1, "P"))) != authored.layout_key(grid)   # the start moved
     assert authored.layout_key(put(grid, (2, 4, "."))) != authored.layout_key(grid)             # a door removed
     assert authored.layout_key(GOOD[3][0].replace("R", "D")) != authored.layout_key(GOOD[3][0].strip())  # lock -> door
+
+
+# ---- variations: a few cells, a row or a column apart ------------------------------------------------
+def every_way_to_leave_out(a, b) -> int:
+    """Reference for authored._fewest_differences: delete each row and column of the longer side in turn."""
+    best = a.size + b.size
+    for i in range(max(a.shape[0], b.shape[0])) if a.shape[0] != b.shape[0] else [None]:
+        for j in range(max(a.shape[1], b.shape[1])) if a.shape[1] != b.shape[1] else [None]:
+            x, y = a, b
+            if i is not None:
+                x, y = (np.delete(x, i, 0), y) if x.shape[0] > y.shape[0] else (x, np.delete(y, i, 0))
+            if j is not None:
+                x, y = (np.delete(x, j, 1), y) if x.shape[1] > y.shape[1] else (x, np.delete(y, j, 1))
+            best = min(best, int((x != y).sum()))
+    return best
+
+
+def test_fewest_differences_agrees_with_trying_every_row_and_column():
+    rng = np.random.default_rng(5)
+    for trial in range(60):
+        h, w = (int(v) for v in rng.integers(3, 9, 2))
+        a = rng.integers(0, 3, (h, w)).astype(np.uint8)
+        for dh in (-1, 0, 1):
+            for dw in (-1, 0, 1):
+                stack = rng.integers(0, 3, (4, h + dh, w + dw)).astype(np.uint8)
+                if trial % 2 and dh >= 0 and dw >= 0:            # a plan that is `a` with a row and a column put in
+                    grown = np.insert(a, int(rng.integers(0, h + 1)), 1, axis=0) if dh else a
+                    stack[0] = np.insert(grown, int(rng.integers(0, w + 1)), 2, axis=1) if dw else grown
+                    assert authored._fewest_differences(a, stack)[0] == 0
+                got = authored._fewest_differences(a, stack)
+                assert got.tolist() == [every_way_to_leave_out(a, other) for other in stack], (trial, dh, dw)
+
+
+def test_one_cell_variants_of_a_map_are_near_duplicates():
+    """Five "different" maps of one reply that are one map with a pillar added here or there."""
+    grid = GOOD[2][0].strip()                                       # 19 x 11 cells
+    variants = [put(grid, (c, r, "#")) for c, r in ((15, 2), (4, 8), (2, 8), (16, 8))]
+    known = authored.Layouts()
+    known.add_grid(grid)
+    for variant in variants + [put(grid, (2, 4, "."))]:             # ... or a door taken out
+        assert authored.examine(lines(variant), 2)                  # a valid map by every other check,
+        assert authored.layout_key(variant) not in known            # no copy,
+        assert known.distance(variant) == pytest.approx(1 / 209) and known.repeats(variant)     # one cell of 209 apart
+        assert all(known.repeats(turned) for turned in turns_and_mirrors(variant))
+    assert known.distance(put(grid, (2, 2, "."), (1, 1, "P"))) == pytest.approx(2 / 209)        # the start moved
+    client = Scripted(lambda request: fence(grid, *variants))
+    rows, stats = authored.collect(client, tiers=[2], per_tier=5, max_requests=1, echo=quiet)
+    assert [row["grid"] for row in rows] == [grid] and stats.rejected == {"near-duplicate": 4}
+    client = Scripted(lambda request: fence(*variants[::-1], grid))        # whichever comes first is the one kept
+    rows, stats = authored.collect(client, tiers=[2], per_tier=5, max_requests=1, echo=quiet)
+    assert [row["grid"] for row in rows] == [variants[-1]] and stats.rejected == {"near-duplicate": 4}
+
+
+def test_a_row_or_a_column_more_is_a_near_duplicate():
+    grid = GOOD[2][0].strip()
+    wider = "\n".join(row[:3] + row[3] + row[3:] for row in lines(grid))            # a room one column wider
+    longer = "\n".join(lines(grid)[:5] + [lines(grid)[5]] + lines(grid)[5:])          # the corridor two cells wide
+    both = "\n".join(row[:3] + row[3] + row[3:] for row in lines(longer))
+    known = authored.Layouts()
+    known.add_grid(grid)
+    for variant in (wider, longer, both):
+        assert authored.examine(lines(variant), 2) and authored.layout_key(variant) not in known
+        assert known.distance(variant) == 0.0
+        assert all(known.distance(turned) == 0.0 for turned in turns_and_mirrors(variant))
+        back = authored.Layouts()                                   # and the other way round: the smaller after the larger
+        back.add_grid(variant)
+        assert back.distance(grid) == 0.0
+    assert known.distance(put(both, (16, 3, "#"))) == pytest.approx(1 / 209)
+    client = Scripted(lambda request: fence(wider, grid, longer, both))
+    rows, stats = authored.collect(client, tiers=[2], per_tier=4, max_requests=1, echo=quiet)
+    assert [row["grid"] for row in rows] == [wider] and stats.rejected == {"near-duplicate": 3}
+    two_wider = "\n".join(row[:3] + row[3] * 2 + row[3:] for row in lines(grid))      # the limit: two columns more
+    assert authored.examine(lines(two_wider), 2) and known.distance(two_wider) == 1.0 and not known.repeats(two_wider)
+
+
+def test_different_maps_are_not_near_duplicates():
+    """The measure leaves maps alone that are not variations: the hand-drawn maps of the dry run
+    against each other and against the frozen suites, and the generated maps of one suite."""
+    drawn = [(tier, grid.strip()) for tier, pair in GOOD.items() for grid in pair]
+    frozen = authored.known_layouts(sorted(SUITES.glob("*.jsonl")))
+    for i, (tier, grid) in enumerate(drawn):
+        others = authored.Layouts()
+        for j, (_, other) in enumerate(drawn):
+            if j != i:
+                others.add_grid(other)
+        assert others.distance(grid) > 3 * authored.NEAR_SHARE
+        if tier not in authored.SUITE_ONLY_TIERS:
+            assert frozen.distance(grid) > authored.NEAR_SHARE, tier
+    for tier in (2, 3, 4):
+        suite = authored.Layouts()
+        for row in cli.read_rows(SUITES / "dev_v1.jsonl"):
+            if row["tier"] == tier:
+                assert not suite.repeats(row["grid"]), row["name"]
+                suite.add_grid(row["grid"])
+        assert len(suite) == 20
+
+
+def test_a_frozen_map_with_one_pillar_added_is_dropped():
+    held = [row["grid"] for row in cli.read_rows(SUITES / "heldout_v1.jsonl") if row["tier"] == 2][:40]
+    taken = authored.known_layouts([SUITES / "heldout_v1.jsonl"])
+    variants = []
+    for grid in held:
+        rows = lines(grid)
+        spot = next(((c, r) for r in range(1, len(rows) - 1) for c in range(1, len(rows[0]) - 1)
+                     if all(rows[r + dr][c + dc] == "." for dr in (-1, 0, 1) for dc in (-1, 0, 1))), None)
+        if spot is None:
+            continue
+        try:
+            found = authored.examine(lines(put(grid, (*spot, "#"))), 2)
+        except authored.Rejected:
+            continue
+        assert found["layout"] not in taken and taken.repeats(found["grid"])        # no copy, but a near-duplicate
+        variants.append(found["grid"])
+    assert len(variants) >= 30
+    client = Scripted(lambda request: fence(*variants, GOOD[2][0]))
+    rows, stats = authored.collect(client, tiers=[2], per_tier=50, max_requests=1, taken=taken, echo=quiet)
+    assert [row["grid"] for row in rows] == [GOOD[2][0].strip()] and stats.rejected == {"near-duplicate": len(variants)}
+
+
+def test_arenas_are_counted_cell_by_cell_within_the_suite_only():
+    """An open room is close to many generated arenas by nature, so for tier 1 the cell count is
+    made against the maps of the suite; a copy of any known map is still dropped."""
+    room = box(13, 9, (1, 1, "P"), (10, 6, "z"), (6, 4, "i"), (4, 4, "#"), (8, 4, "#"))
+    cousin = put(room, (6, 2, "#"))                                  # the same room with a third pillar
+    taken = authored.Layouts()
+    taken.add_grid(room)
+    assert taken.repeats(cousin)
+    client = Scripted(lambda request: fence(room.replace("i", "s"), cousin, put(cousin, (6, 6, "#"))))
+    rows, stats = authored.collect(client, tiers=[1], per_tier=3, max_requests=1, taken=taken, echo=quiet)
+    assert [row["grid"] for row in rows] == [cousin] and stats.rejected == {"near-duplicate": 2}
+    generated = authored.known_layouts(sorted(SUITES.glob("*.jsonl")))
+    assert generated.repeats(GOOD[1][0].strip())                     # a hand-drawn arena, near a generated one
+    client = Scripted(lambda request: fence(GOOD[1][0]))
+    rows, stats = authored.collect(client, tiers=[1], per_tier=1, max_requests=1, taken=generated, echo=quiet)
+    assert len(rows) == 1 and not stats.rejected
+
+
+def test_variations_of_the_maps_already_in_the_suite_are_dropped(tmp_path):
+    """--resume: the maps of the suite file count, by key and by cells; bare keys count as copies only."""
+    grid = GOOD[3][0].strip()
+    first, _ = authored.collect(Scripted(lambda request: fence(grid)), tiers=[3], per_tier=1, max_requests=1, echo=quiet)
+    variant = put(grid, (12, 3, "#"))
+    assert authored.examine(lines(variant), 3)
+    client = Scripted(lambda request: fence(variant, grid.replace("z", "i"), GOOD[3][1]))
+    rows, stats = authored.collect(client, tiers=[3], per_tier=3, max_requests=1, rows=first, echo=quiet)
+    assert [row["grid"] for row in rows] == [grid, GOOD[3][1].strip()] and stats.rejected == {"near-duplicate": 2}
+    rows, stats = authored.collect(client, tiers=[3], per_tier=3, max_requests=1, taken={first[0]["layout"]}, echo=quiet)
+    assert [row["grid"] for row in rows] == [variant, GOOD[3][1].strip()] and stats.rejected == {"near-duplicate": 1}
+    taken = authored.Layouts()
+    taken.add_grid(grid)
+    rows, stats = authored.collect(client, tiers=[3], per_tier=3, max_requests=1, taken=taken, echo=quiet)
+    assert [row["grid"] for row in rows] == [GOOD[3][1].strip()] and stats.rejected == {"near-duplicate": 2}
+    assert len(taken) == 1 and taken.distance(GOOD[3][1].strip()) == 1.0        # the caller's layouts are left as they were
 
 
 def test_copies_are_dropped_within_a_run_and_against_the_frozen_suites():
@@ -1134,7 +1291,8 @@ def test_real_run_against_a_stand_in_endpoint_leaves_no_secret_anywhere(endpoint
 
 
 # ---- the file itself --------------------------------------------------------------------------------
-def test_module_uses_the_standard_library_only():
+def test_module_uses_the_standard_library_and_numpy_only():
+    """No HTTP client library: requests are made with urllib. numpy counts the cells of the near-duplicate test."""
     tree = ast.parse(MODULE.read_text())
     top = set()
     for node in ast.walk(tree):
@@ -1143,7 +1301,7 @@ def test_module_uses_the_standard_library_only():
         elif isinstance(node, ast.ImportFrom) and node.level == 0:
             top.add(node.module.split(".")[0])
     import sys
-    assert top <= set(sys.stdlib_module_names), top - set(sys.stdlib_module_names)
+    assert top <= set(sys.stdlib_module_names) | {"numpy"}, top - set(sys.stdlib_module_names)
     relative = {(node.level, node.module) for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.level}
     assert relative == {(1, None), (1, "solver")}                         # the generator package, nothing else
     assert "urllib" in top and not top & {"requests", "httpx", "http", "subprocess", "socket"}

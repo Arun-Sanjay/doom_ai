@@ -340,9 +340,9 @@ def check_map(m: dict, bare: bool = False) -> None:
         assert counts["locks"] == 0 and (bare or counts["monsters"] >= 2)
     if tier == 2:
         assert counts["exits"] == 1 and counts["locks"] == 0
-    if tier in (3, 4):                                          # tier 3 may be monster-free, tier 4 never is
+    if tier in (3, 4):
         assert counts["exits"] == 1 and sol.keys_needed
-        assert counts["locks"] >= (1 if tier == 3 else 2) and (bare or tier == 3 or counts["monsters"] >= 4)
+        assert counts["locks"] >= (1 if tier == 3 else 2) and (bare or counts["monsters"] >= (1 if tier == 3 else 4))
         doors = [ch for ch in grid if ch in udmf.LOCKED_DOOR_CHARS]
         assert len(set(doors)) == len(doors)                   # every lock has its own colour
     if bare:
@@ -373,21 +373,43 @@ def test_each_tier_generates_solvable_maps():
     assert sum(m["counts"]["doors_met_before_key"] for m in tier3) >= 0.6 * locks   # the door is usually met first
 
 
-def test_keys_and_locks_come_without_combat_too():
-    """Maps with a key and a lock but no monster exist in tier 0 and in tier 3 (about 40% of each), and
-    tier 3 has light opposition only, so its exit rate measures keys and doors rather than combat."""
-    tier0 = [layouts.generate(0, seed) for seed in range(200)]
-    tier3 = [layouts.generate(3, seed) for seed in range(200)]
-    locked = [m for m in tier0 if m["counts"]["locks"]]
-    quiet = [m for m in tier3 if m["counts"]["monsters"] == 0]
-    assert 60 <= len(locked) <= 100 and 60 <= len(quiet) <= 100            # 72 and 75 of 200
-    assert all(m["counts"]["locks"] == m["counts"]["keys"] == 1 and solve(m["grid"]).keys_needed for m in locked)
-    assert all(m["counts"]["locks"] >= 1 and solve(m["grid"]).keys_needed and not m["options"] for m in quiet)
-    assert not any(m["counts"]["monsters"] for m in tier0)
-    assert {ch for m in tier3 for ch in m["grid"] if ch in udmf.MONSTER_CHARS} == set("zisl")
-    assert layouts.MIN_MONSTERS[3] == 0 and not set("cdg") & {kind for kind, _ in layouts.MONSTER_MIX[3]}
-    for tier in (1, 4):                                        # the combat tiers keep their monsters
-        assert all(layouts.generate(tier, seed)["counts"]["monsters"] >= layouts.MIN_MONSTERS[tier] >= 2 for seed in range(30))
+def test_a_third_of_tier_0_has_a_key_and_a_locked_door():
+    """Keys and locked doors without combat: one tier 0 map in three has exactly one key and one locked
+    door of its colour that the route to the exit must pass, and still no monster."""
+    maps = [layouts.generate(0, seed) for seed in range(300)]
+    locked = [m for m in maps if m["counts"]["locks"]]
+    assert len(locked) == 100 and [m["seed"] for m in locked] == list(range(2, 300, 3))
+    assert [bool(m["counts"]["locks"]) for m in maps] == [layouts.has_key_stage(0, seed) for seed in range(300)]
+    assert not any(layouts.has_key_stage(tier, seed) for tier in (1, 2, 3, 4) for seed in range(50))
+    for m in locked:
+        grid = m["grid"]
+        doors = [ch for ch in grid if ch in udmf.LOCKED_DOOR_CHARS]
+        keys = [ch for ch in grid if ch in udmf.KEY_CHARS]
+        assert len(doors) == len(keys) == 1 and grid.count("E") == 1 and not set(grid) & udmf.MONSTER_CHARS
+        assert {"R": "r1", "B": "b2", "Y": "y3"}[doors[0]].count(keys[0]) == 1        # the key fits the door
+        sol = solve(grid)
+        assert sol.keys_needed and sol.exit_reachable                    # the door is on every route to the exit
+        assert not solve(grid.replace(keys[0], ".")).exit_reachable      # and without the key it stays shut
+        check_map(m)
+    assert not any(m["counts"]["monsters"] for m in maps)
+    assert len({m["style"] for m in locked}) >= 4 and len({m["exit_style"] for m in locked}) == 5
+    assert {ch for m in locked for ch in m["grid"] if ch in udmf.LOCKED_DOOR_CHARS} == set("RBY")
+    assert sum(m["counts"]["doors_met_before_key"] for m in locked) >= 0.4 * len(locked)
+    # A tier 0 map without a lock is the map the tier gives when no seed is a key map.
+    for m in [m for m in maps if not m["counts"]["locks"]][:25]:
+        plain = layouts.draft(0, random.Random(f"mapgen-v1/0/{m['seed']}/{m['attempts'] - 1}"))
+        assert plain["grid"] == m["grid"] and plain["episode_ticks"] == m["episode_ticks"]
+
+
+def test_tiers_1_to_4_still_generate_the_frozen_maps():
+    """The tier 0 key maps left the other tiers alone: `generate` still gives the maps that were
+    frozen into the development suite, and tier 3 and tier 4 keep their monsters."""
+    rows = cli.read_rows(SUITES / "dev_v1.jsonl")
+    for row in rows[::4]:
+        m = layouts.generate(row["tier"], row["seed"])
+        assert (m["grid"], m["episode_ticks"], m["options"]) == (row["grid"], row["episode_ticks"], row["options"])
+    for tier in (1, 3, 4):
+        assert all(layouts.generate(tier, seed)["counts"]["monsters"] >= layouts.MIN_MONSTERS[tier] >= 1 for seed in range(30))
 
 
 def test_without_monsters_keeps_everything_but_the_monsters():
@@ -426,9 +448,10 @@ def test_without_monsters_keeps_everything_but_the_monsters():
 
 @pytest.mark.parametrize("tier", [0, 3])
 def test_lock_maps_without_monsters_are_finished_without_a_shot(tmp_path, tier):
-    """Tier 0 maps with a lock and monster-free tier 3 maps, played exactly as generated: the reference
-    walker (it never fires) fetches the key, opens the locked door and reaches the pad alive."""
-    maps = [m for m in (cli.make_map(tier, seed) for seed in range(30)) if m["counts"]["locks"] and not m["counts"]["monsters"]][:3]
+    """Tier 0 maps with a lock exactly as generated, and tier 3 maps written with --strip-monsters:
+    the reference walker (it never fires) fetches the key, opens the locked door and reaches the pad alive."""
+    maps = [m for m in (cli.make_map(tier, seed, strip=tier > 0) for seed in range(30))
+            if m["counts"]["locks"] and not m["counts"]["monsters"]][:3]
     assert len(maps) == 3
     for m in maps:
         assert not set(m["grid"]) & udmf.MONSTER_CHARS and solve(m["grid"]).keys_needed
@@ -587,6 +610,24 @@ def test_suites_are_frozen_and_rebuild_byte_stable(tmp_path, name):
 def test_suites_do_not_overlap():
     grids = [{row["grid"] for row in cli.read_rows(SUITES / f"{name}.jsonl")} for name in sorted(SUITE_SIZES)]
     assert len(grids[0]) == 80 and len(grids[1]) == 400 and not grids[0] & grids[1]
+
+
+NAV_SUITES = {"heldout_nav_v1": "heldout_v1", "dev_nav_v1": "dev_v1"}
+
+
+@pytest.mark.parametrize("name", sorted(NAV_SUITES))
+def test_navigation_suites_are_the_frozen_maps_without_monsters(name):
+    """A navigation suite is tiers 2-4 of its full suite, row for row, with only the monsters removed,
+    and it matches its recorded checksums."""
+    path, full_name = SUITES / f"{name}.jsonl", NAV_SUITES[name]
+    assert cli.suite_checksums(path) == json.loads((SUITES / "checksums.json").read_text())[path.name]
+    rows = cli.read_rows(path)
+    source = [row for row in cli.read_rows(SUITES / f"{full_name}.jsonl") if row["tier"] in (2, 3, 4)]
+    assert len(rows) == len(source) == 3 * SUITE_SIZES[full_name]
+    for row, full in zip(rows, source):
+        assert row == {**layouts.without_monsters(full), "name": full["name"].replace(full_name, name)}
+        assert row["episode_ticks"] == full["episode_ticks"] and row["counts"]["locks"] == full["counts"]["locks"]
+        check_map(row, bare=True)
 
 
 @pytest.mark.slow

@@ -1,0 +1,18 @@
+unified_smoke.json: the 25-minute check that the one-loop training teaches navigation
+====================================================================================
+
+Run on a laptop (6 worker processes x 16 environments, learner on the Apple GPU) from random
+initialisation. Results: training/logs/unified_smoke.txt and unified_smoke.csv.
+
+    python -m training.rl.select_maps --maps data/maps/train/manifest.jsonl --out data/maps/unified_smoke_train.jsonl \
+        --tiers 0,2 --max-monsters 0 --on-grid                 # 258 monster-free maps the teacher labels
+    python -u -m training.rl.train --maps data/maps/unified_smoke_train.jsonl \
+        --config training/configs/unified_smoke.json --out runs/rl/unified_smoke --max-minutes 25
+
+  rollout 64 x 96 environments = 6144 steps per iteration; minibatch_chunks 64 (1024 samples) and 4
+  epochs give 24 gradient steps per iteration.
+  teach: beta 1.0 -> 0.2 over the first 700,000 steps (about half of what 25 minutes collect here).
+  distill.levels [1.0]: the weight stays 1; the held-out measurement is made after the run.
+  curriculum: one stage, tier 0 and tier 2 half each, no thresholds.
+  ppo.bootstrap_on_truncation false: the tick cap is terminal.
+  total_steps 1.5 M spans the learning-rate schedule (5e-4 -> 1.5e-4).

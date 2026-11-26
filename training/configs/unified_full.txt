@@ -1,0 +1,30 @@
+unified_full.json: one-loop training on every tier, starting from a combat checkpoint
+==================================================================================
+
+Same loop, teacher, mixing, loss and held-out gate as unified_nav.json (see unified_nav.txt for
+each setting). What differs:
+
+    --maps    data/maps/train/manifest.jsonl          (all five tiers)
+    --heldout data/maps/dev/manifest.jsonl            (training/suites/dev_v1.jsonl rebuilt, monsters included)
+
+Curriculum: arenas stay in the mix at every stage, so combat is not forgotten
+  Stage budgets in environment steps (threshold 2.0 can never be met: while beta is high the exit
+  rate in training is the teacher's and says nothing about the student).
+                tier 0   tier 1   tier 2   tier 3   tier 4
+    nav          70 %     30 %                                  first 15 M steps
+    doors        25 %     25 %     50 %                         next 25 M
+    keys         10 %     20 %     30 %     40 %                next 40 M
+    gauntlet      5 %     20 %     15 %     20 %     40 %       next 60 M
+    adaptive      tiers 1-4, weight (1 - recent exit rate) + 0.3 each, from 140 M steps on
+  adaptive_floor 0.3 (default 0.1) keeps every tier, the arenas included, above roughly 12 % of the
+  episodes however well it goes. About half of the arenas have no exit: there the only way to
+  score is to fight.
+
+On steps with a visible enemy the teacher gives no controller labels and the executed action is
+always the student's, so in arenas and in fights on the other tiers the controller is trained by
+PPO alone. The manager still gets its label there (sub-goal "fight", target = the enemy's cell).
+
+Distillation weight
+  min_rate 0.3 (unified_nav: 0.5): the held-out maps contain monsters, where the teacher alone
+  exits about one map in three, so 0.5 would hold the weight at 1 for too long. tolerance 0.06 with
+  384 episodes, as in unified_nav. 14 of the 80 dev maps have no exit; the rate is over the others.

@@ -188,7 +188,78 @@ class RandomDriver:
         return self.a
 
 
-DRIVERS = {"explorer": Explorer, "random": RandomDriver}
+class ButtonMasher:
+    """Every one of the nine buttons redrawn at random and held for 1 to 8 steps: both turn keys, ATTACK and
+    the weapon key included. The closest thing to an untrained policy with sampled heads."""
+
+    def __init__(self, seed):
+        self.rng, self.left, self.a = np.random.default_rng(seed), 0, NOOP.copy()
+
+    def act(self, obs):
+        if self.left <= 0:
+            self.a = self.rng.integers(0, 2, size=9).astype(np.int8)
+            self.left = int(self.rng.integers(1, 9))
+        self.left -= 1
+        return self.a
+
+
+class WallHugger:
+    """Holds forward and a strafe key towards the nearer side wall and turns away when blocked: it slides along
+    walls all the time and leans on whatever stands in its way. Never attacks."""
+
+    def __init__(self, seed):
+        self.rng, self.turn, self.hold, self.side = np.random.default_rng(seed), 0, 0, 1
+
+    def act(self, obs):
+        d, rng = np.asarray(obs["rays"]["distance"], np.float64) * spec.RAY_RANGE, self.rng
+        a = np.zeros(9, np.int8)
+        if self.hold > 0:
+            self.hold -= 1
+        else:
+            self.turn = 0
+            if d[0] < 36:
+                self.turn, self.hold = (1 if d[8:25].max() > d[40:57].max() else -1), int(rng.integers(3, 9))
+            elif rng.random() < 0.05:
+                self.turn, self.hold = (1 if rng.random() < 0.5 else -1), int(rng.integers(1, 6))
+            if rng.random() < 0.05:
+                self.side = -self.side
+            elif rng.random() < 0.2:
+                self.side = 1 if d[16] < d[48] else -1
+        a[4], a[5] = self.turn > 0, self.turn < 0
+        a[0] = 1
+        a[2 if self.side > 0 else 3] = 1
+        return a
+
+
+DRIVERS = {"explorer": Explorer, "random": RandomDriver, "masher": ButtonMasher, "hugger": WallHugger}
+
+
+def masked(a, obs):
+    """The buttons `a` after the two action masks of `spec.action_masks`, as the agent applies them."""
+    rays, ents = obs["rays"], obs["visible_entities"]
+    use_ok, attack_ok = spec.action_masks(rays["distance"], rays["hit_type"], ents["entity_type"], ents["mask"], obs["vitals"][2])
+    a = np.array(a, np.int8)
+    a[7] &= use_ok
+    a[6] &= attack_ok
+    return a
+
+
+def generated_maps(root, tiers, count, need):
+    """`count` generated maps per tier whose counts satisfy `need(counts)`: [(name, wad path, grid)].
+    Seeds start at 70,000, far from the training and suite seeds; starts are cell-centred and face east."""
+    layouts = pytest.importorskip("training.mapgen.layouts")
+    udmf = pytest.importorskip("training.mapgen.udmf")
+    out = []
+    for tier in tiers:
+        seed, found = 70000, 0
+        while found < count:
+            m = layouts.generate(tier, seed)
+            seed += 1
+            if need(m["counts"]):
+                name = f"t{tier}_{seed - 1}"
+                out.append((name, str(udmf.write_wad(m["grid"], root / f"{name}.wad", **m["options"])), m["grid"]))
+                found += 1
+    return out
 
 
 def run_episode(wad, map_name, driver, seed, steps, with_map=False, record=None):
@@ -466,6 +537,138 @@ def test_monster_in_the_way_does_not_run_the_estimate_through_it(grid, limit):
     env.close()
 
 
+# A demon two cells ahead and one row to the left of the start, in an open room: it walks up to the player.
+PUNCH_GRID = "#########\n#.......#\n#...d...#\n#.P.....#\n#.......#\n#########"
+WEAPON = np.array([0, 0, 0, 0, 0, 0, 0, 0, 1], np.int8)
+ATTACK = np.array([0, 0, 0, 0, 0, 0, 1, 0, 0], np.int8)
+
+
+def punch_run(wad, use_mask):
+    """Weapon key once (selects the fist), then ATTACK held next to a melee monster; no turn key is ever pressed.
+    Returns (largest heading error, attacks withheld by the mask, steps with the fist selected)."""
+    env, _ = open_env(wad, steps=120)
+    obs = reset(env, 3)
+    truth, od = Truth(env), Odometry()
+    worst, withheld, fist = 0.0, 0, 0
+    for a in [WEAPON] + [NOOP] * 8 + [ATTACK] * 80:
+        if use_mask:
+            pressed = int(a[6])
+            a = masked(a, obs)
+            withheld += pressed - int(a[6])
+        obs, *_ = env.step(a)
+        od.update(a, obs)
+        fist += int(obs["vitals"][2]) == spec.MELEE_WEAPON_SLOT
+        worst = max(worst, angle_error(od.theta, truth.pose(env)[2]))
+    env.close()
+    return worst, withheld, fist
+
+
+def test_a_punch_turns_the_player_and_the_attack_mask_prevents_it(tmp_path):
+    """The engine turns the player towards the target of a melee hit although no turn key is down, which no
+    model of the buttons can follow. `spec.action_masks` therefore masks ATTACK while the melee slot is
+    selected. First run: the raw script, to show the effect is real. Second run: the same script through the
+    mask, and the heading stays exact."""
+    udmf = pytest.importorskip("training.mapgen.udmf")
+    wad = str(udmf.write_wad(PUNCH_GRID, tmp_path / "punch.wad"))
+    raw, _, fist = punch_run(wad, use_mask=False)
+    assert fist > 50 and raw > math.radians(5.0), f"expected the punch to turn the player, heading error {math.degrees(raw):.2f} degrees"
+    kept, withheld, fist = punch_run(wad, use_mask=True)
+    assert fist > 50 and withheld > 20, "the mask was meant to withhold the punches"
+    assert kept < 1e-6, f"heading error {math.degrees(kept):.6f} degrees with the mask"
+
+
+def masked_heading_runs(maps, seeds, steps):
+    """Random buttons through the action masks on maps with monsters, the player killable as in a real run.
+    Returns (episodes, steps, largest heading error, attacks fired, attacks withheld with the melee slot selected)."""
+    episodes = total = fired = withheld = 0
+    worst = 0.0
+    for _, wad, _ in maps:
+        env, _ = open_env(wad, steps=steps)
+        for seed in seeds:
+            obs, _ = env.reset(seed=seed)
+            truth, od, drv = Truth(env), Odometry(), ButtonMasher(seed)
+            episodes += 1
+            for _ in range(steps):
+                raw = drv.act(obs)
+                a = masked(raw, obs)
+                withheld += int(raw[6]) and not a[6] and int(obs["vitals"][2]) == spec.MELEE_WEAPON_SLOT
+                fired += int(a[6])
+                obs, _, term, trunc, _ = env.step(a)
+                if term or trunc:
+                    break
+                od.update(a, obs)
+                total += 1
+                worst = max(worst, angle_error(od.theta, truth.pose(env)[2]))
+        env.close()
+    return episodes, total, worst, fired, withheld
+
+
+def test_heading_is_exact_with_masked_attacks(tmp_path):
+    """Fast version of the measurement below: 12 episodes on 4 generated maps with monsters."""
+    maps = generated_maps(tmp_path, (1, 4), 2, lambda c: c["monsters"] >= 3)
+    episodes, total, worst, fired, withheld = masked_heading_runs(maps, range(3), 200)
+    assert episodes == 12 and total > 1000 and fired > 20 and withheld > 20
+    assert worst < 1e-6, f"heading error {math.degrees(worst):.6f} degrees"
+
+
+@pytest.mark.slow
+def test_heading_is_exact_with_masked_attacks_over_many_episodes(tmp_path):
+    """240 episodes of random buttons (ATTACK and the weapon key included) through `spec.action_masks` on 24
+    generated maps of tiers 1, 3 and 4 with monsters, no god mode: the heading matches the engine at every step."""
+    maps = generated_maps(tmp_path, (1, 3, 4), 8, lambda c: c["monsters"] >= 3)
+    episodes, total, worst, fired, withheld = masked_heading_runs(maps, range(10), 260)
+    print(f"\nmasked attacks: {episodes} episodes, {total} steps, {fired} attacks fired, {withheld} withheld with the melee "
+          f"slot selected, largest heading error {worst:.2e} rad")
+    assert episodes >= 200 and fired > 500 and withheld > 500
+    assert worst < 1e-6, f"heading error {math.degrees(worst):.6f} degrees"
+
+
+DOOR_CORRIDOR = "##########\n#P..D...E#\n##########"
+
+
+@pytest.mark.parametrize("turn,keys", [(5, (0,)), (4, (0,)), (None, (0, 2)), (4, (0, 3))])
+def test_pushing_through_a_door_while_sliding_along_the_corridor_wall(turn, keys):
+    """One-cell corridor with a door: the agent turns a little (or strafes), so it slides along a side wall,
+    presses USE once at the door and walks on through it. While the door opens, the walls behind it come
+    into view; they must not be matched against the door face or the walls seen before."""
+    env, _ = open_env(fixture_wad(DOOR_CORRIDOR), steps=120)
+    obs = reset(env, 0)
+    truth, od = Truth(env), Odometry()
+    move = np.zeros(9, np.int8)
+    move[list(keys)] = 1
+    pressed, worst, measured = False, 0.0, 0
+    for t in range(40):
+        a = move.copy()
+        if turn is not None and t < 3:
+            a = np.zeros(9, np.int8)
+            a[turn] = 1
+        if not pressed and obs["rays"]["hit_type"][0] == spec.HIT_DOOR and obs["rays"]["distance"][0] * spec.RAY_RANGE < 62:
+            a[7], pressed = 1, True
+        obs, _, term, trunc, _ = env.step(a)
+        if term or trunc:
+            break
+        od.update(a, obs)
+        tx, ty, tth = truth.pose(env)
+        worst = max(worst, math.hypot(od.x - tx, od.y - ty))
+        measured += od.last_mode != "free"
+        assert angle_error(od.theta, tth) < 1e-6
+    env.close()
+    assert pressed and od.x > 250 and measured > 5, "the walk was meant to slide along the wall and pass the door"
+    assert worst < 1.0, f"worst error {worst:.2f}"
+
+
+def test_leaning_on_a_monster_in_a_corridor_stays_inside_the_position_target():
+    """One-cell corridor with a monster at its end and a driver that holds forward and strafe, so it leans on
+    the monster and on the walls for most of the run (god mode, 520 steps). The room in front of the monster
+    bounds every step, so the estimate cannot run through it; what is left is the monster's own movement."""
+    finals = []
+    for seed in range(4):
+        errors, heading, _, od = run_episode(fixture_wad("#########\n#P..h..z#\n#########"), "MAP01", "hugger", seed, 520)
+        assert heading < 1e-6 and len(errors) == 520
+        finals.append(errors[-1])
+    assert np.median(finals) < 16.0 and max(finals) < 32.0, f"errors at step 520: {np.round(finals, 1)}"
+
+
 def test_odometry_reset():
     env, obs = open_env("maps/two_rooms.wad", steps=60)
     od = Odometry()
@@ -601,6 +804,92 @@ def test_door_rule_open_door_stops_showing_and_returns_when_closed():
     assert cell(crop, spec.CH_DOOR, 3) == 1 and crop[spec.CH_DOOR].sum() == 1
     assert cell(crop, spec.CH_USED, 3) == 0.0                  # the USE mark has faded (64 steps)
     env.close()
+
+
+@pytest.mark.parametrize("grid", ["#####\n#.DP#\n#####", "#####\n#PD.#\n#####", "#######\n#.RP..#\n#######"])
+def test_a_door_next_to_the_start_marks_its_own_cell_only(grid, tmp_path):
+    """Start beside a door: one ray ends exactly on the corner between the door's face and the corridor wall.
+    That corner is collinear with the wall's points; the door bit must still land on the door's cell."""
+    udmf = pytest.importorskip("training.mapgen.udmf")
+    env, obs = open_env(str(udmf.write_wad(grid, tmp_path / "door.wad")), steps=50)
+    mem = MemoryMap()
+    mem.update((0.0, 0.0, 0.0), obs, None, None, 0)
+    crop, truth = mem.crop((0.0, 0.0, 0.0)), grid_truth(grid)
+    marked = [truth.get((int(i), int(j)), "?") for ch in (spec.CH_DOOR, spec.CH_LOCKED) for i, j in np.argwhere(crop[ch] > 0)]
+    assert marked and all(ch in DOOR_CHARS for ch in marked), f"door bits on cells {marked}"
+    env.close()
+
+
+def phantom_doors(wad, grid, driver, seed, steps, true_pose):
+    """Drive one episode and compare the door channels of the crop with the grid after every step.
+
+    Returns (steps, steps with a door bit on a cell that is not a door, distinct such cells,
+    door cell-steps marked correctly). With `true_pose` the map is written at the engine's pose,
+    which isolates the write rule from odometry drift."""
+    truth_cells = grid_truth(grid)
+    is_door = np.zeros((spec.CROP_SIZE, spec.CROP_SIZE), bool)
+    for (i, j), ch in truth_cells.items():
+        if 0 <= i < spec.CROP_SIZE and 0 <= j < spec.CROP_SIZE:
+            is_door[i, j] = ch in DOOR_CHARS
+    env, _ = open_env(wad, steps=steps)
+    obs, _ = env.reset(seed=seed)
+    truth, od, mem, drv = Truth(env), Odometry(), MemoryMap(), DRIVERS[driver](seed)
+    mem.update(od.pose, obs, None, None, 0)
+    n = bad_steps = good = 0
+    cells = set()
+    for t in range(1, steps + 1):
+        a = drv.act(obs).copy()
+        obs, _, term, trunc, _ = env.step(a)
+        if term or trunc:
+            break
+        od.update(a, obs)
+        mem.update(truth.pose(env) if true_pose else od.pose, obs, a, None, t)
+        crop = mem.crop((0.0, 0.0, 0.0))
+        door = (crop[spec.CH_DOOR] > 0) | (crop[spec.CH_LOCKED] > 0)
+        bad = door & ~is_door
+        n += 1
+        good += int((door & is_door).sum())
+        if bad.any():
+            bad_steps += 1
+            cells.update((int(i), int(j)) for i, j in np.argwhere(bad))
+    env.close()
+    return n, bad_steps, len(cells), good
+
+
+def phantom_door_table(maps, steps, true_pose):
+    total = np.zeros(4, np.int64)
+    runs = with_phantom = 0
+    for name, wad, grid in maps:
+        for driver in ("explorer", "hugger"):
+            row = phantom_doors(wad, grid, driver, 0, steps, true_pose)
+            total += row
+            runs += 1
+            with_phantom += row[2] > 0
+    return runs, with_phantom, total
+
+
+def test_door_bits_stay_on_door_cells_while_exploring(tmp_path):
+    """Per-step check on 4 generated maps with doors, written at the true pose: door bits appear on door cells
+    only. (Before the fix a wall cell next to a door showed a door in about 40% of such runs.)"""
+    maps = generated_maps(tmp_path, (2, 3), 2, lambda c: c["doors"] + c["locks"] >= 4)
+    runs, with_phantom, (n, bad_steps, cells, good) = phantom_door_table(maps, 300, true_pose=True)
+    assert runs == 8 and good > 1000, "the runs were meant to see doors"
+    assert cells == 0, f"{cells} phantom door cells, on the map in {bad_steps} of {n} steps"
+
+
+@pytest.mark.slow
+def test_phantom_door_rate_on_generated_maps(tmp_path):
+    """Phantom door cells on 12 generated maps with doors (tiers 2 to 4), two drivers, 800 steps, with the
+    true pose (the write rule alone) and with the odometry pose (the real pipeline). Prints the table."""
+    maps = generated_maps(tmp_path, (2, 3, 4), 4, lambda c: c["doors"] + c["locks"] >= 4)
+    print("\nphantom door cells on generated maps with doors (door bit on a cell that is not a door)")
+    for true_pose in (True, False):
+        runs, with_phantom, (n, bad_steps, cells, good) = phantom_door_table(maps, 800, true_pose)
+        print(f"pose {'true' if true_pose else 'odometry':8s}: {runs} runs, {n} steps: runs with a phantom {with_phantom}, distinct cells {cells}, "
+              f"steps with one on the map {bad_steps} ({100 * bad_steps / n:.1f}%), correct door cell-steps {good}")
+        # With the odometry pose a door bit can still land beside its door on a run whose position has
+        # drifted by more than the few units the door rule allows for; that is drift, not the rule.
+        assert with_phantom <= (0 if true_pose else 0.15 * runs) and bad_steps <= 0.10 * n
 
 
 def test_exit_used_visited_and_recency_channels():

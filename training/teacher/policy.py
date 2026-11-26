@@ -45,12 +45,16 @@ class ExitSensor:
       "noisy"  the same, degraded by `training.exit_label.noisy` (20% misses, position noise,
                rare false detections): the condition the policy is trained under
       "none"   never reports an exit
+    `max_range` drops sightings further away than that many map units (a detector with a shorter
+    reach than the labels' 640 units). `noise` overrides the noise levels of the "noisy" source.
     """
 
-    def __init__(self, source: str = "label"):
+    def __init__(self, source: str = "label", max_range: float | None = None, noise: dict | None = None):
         if source not in EXIT_SOURCES:
             raise ValueError(f"exit_source must be one of {EXIT_SOURCES}, not {source!r}")
         self.source = source
+        self.max_range = None if max_range is None else float(max_range)
+        self.noise = dict(noise or {})        # keyword arguments of exit_label.noisy (p_drop, sigma_rel, sigma_abs, p_false)
         self._env = self._meta = None
         self._rng = np.random.default_rng(0)
 
@@ -66,8 +70,10 @@ class ExitSensor:
         from training import exit_label
 
         seen = exit_label.exit_observation(self._env, self._meta)[:3]
+        if seen[0] and self.max_range is not None and seen[1] * seen[1] + seen[2] * seen[2] > self.max_range ** 2:
+            seen = (False, 0.0, 0.0)
         if self.source == "noisy":
-            seen = exit_label.noisy(seen, self._rng)
+            seen = exit_label.noisy(seen, self._rng, **self.noise)
         if not seen[0]:
             return None
         return np.array([1.0, seen[1] / spec.RAY_RANGE, seen[2] / spec.RAY_RANGE], np.float32)
@@ -82,13 +88,26 @@ class TeacherPolicy:
     budget_steps   the assumed time budget in decision steps handed to the encoder and the
                    teacher; `set_budget()` overrides it for the coming episode (the gate
                    evaluation sets the true cap that way). Default: spec.DEFAULT_BUDGET_STEPS.
+    exit_range     drop exit observations from further away than this (see ExitSensor); pair it
+                   with the teacher's `view_range`.
+    exit_noise     noise levels of the "noisy" exit source, e.g. {"p_false": 0.03} (see ExitSensor).
+    slip           stand-in for a student that drives: on each step, with this probability, a
+                   run of random actions starts (mean length `slip_steps`) and is executed instead
+                   of the teacher's. The random actions pass through `spec.action_masks` as the
+                   student's do, and press USE with probability `slip_use` when it is allowed. The
+                   teacher keeps labelling throughout and sees the executed action as its
+                   previous action, which is exactly its situation in the training loop.
     Other keyword arguments go to `Teacher`.
     """
 
-    def __init__(self, combat_policy=None, exit_source: str = "label", budget_steps: float | None = None, **teacher):
+    def __init__(self, combat_policy=None, exit_source: str = "label", budget_steps: float | None = None,
+                 slip: float = 0.0, slip_steps: float = 4.0, slip_use: float = 0.3, exit_range: float | None = None,
+                 exit_noise: dict | None = None, **teacher):
         self.combat_policy = combat_policy
-        self.sensor = ExitSensor(exit_source)
+        self.sensor = ExitSensor(exit_source, exit_range, exit_noise)
         self.default_budget = float(budget_steps if budget_steps is not None else spec.DEFAULT_BUDGET_STEPS)
+        self.slip, self.slip_steps, self.slip_use = float(slip), max(1.0, float(slip_steps)), float(slip_use)
+        self._slip_rng = np.random.default_rng(0)
         self.odom, self.mem, self.enc = Odometry(), MemoryMap(), Encoder()
         self.teacher = Teacher(**teacher)
         self.reset()
@@ -100,6 +119,7 @@ class TeacherPolicy:
 
     def seed(self, seed: int) -> None:
         self.sensor.seed(seed)
+        self._slip_rng = np.random.default_rng([int(seed), 0x511B])
 
     def set_budget(self, steps: float) -> None:
         """Assumed time budget, in decision steps, for the episode that is starting."""
@@ -128,6 +148,11 @@ class TeacherPolicy:
         self.leave_route = (0, 0, 0)        # and the cells, closed doors and turns of its route
         self.counts = np.zeros(spec.NUM_SUBGOALS, np.int64)
         self.modes: dict = {}               # steering mode -> steps
+        self.slipped = 0                    # steps on which a random action was executed instead of the teacher's
+        self.use_masked = 0                 # steps on which the teacher asked for USE while the action mask forbids it
+        self.labelled = 0                   # steps whose label carried controller labels (none on fight steps and
+                                            # on maps the teacher's grid does not fit)
+        self._slip_left = 0
 
     def act(self, obs) -> np.ndarray:
         step, prev = self.step, self.prev_action
@@ -145,6 +170,7 @@ class TeacherPolicy:
         self.front_seconds += t1 - t0
         self.label_seconds += t2 - t1
         self.counts[label.subgoal] += 1
+        self.labelled += int(label.head_mask.any())
         mode = self.teacher.info.get("mode", "")
         self.modes[mode] = self.modes.get(mode, 0) + 1
         if self.exit_step < 0 and self.teacher.exit_known:
@@ -160,9 +186,29 @@ class TeacherPolicy:
             action = np.asarray(self.combat_policy.act(obs)).astype(np.int8)
         else:
             action = spec.heads_to_buttons(label.heads)
+        if label.heads[spec.HEAD_USE] or self.slip > 0.0:
+            ents = obs["visible_entities"]
+            use_ok, _ = spec.action_masks(obs["rays"]["distance"], obs["rays"]["hit_type"], ents["entity_type"],
+                                          ents["mask"], obs["vitals"][2])
+            self.use_masked += int(bool(label.heads[spec.HEAD_USE]) and not use_ok)
+            if self.slip > 0.0:
+                action = self._slipped(action, use_ok)
         self.prev_action = action
         self.step = step + 1
         return action
+
+    def _slipped(self, action: np.ndarray, use_ok: bool) -> np.ndarray:
+        """The teacher's action, or a random one while a run of random actions lasts (see `slip`)."""
+        rng = self._slip_rng
+        if self._slip_left <= 0 and rng.random() < self.slip:
+            self._slip_left = int(rng.geometric(1.0 / self.slip_steps))
+        if self._slip_left <= 0:
+            return action
+        self._slip_left -= 1
+        self.slipped += 1
+        heads = np.array([rng.integers(3), rng.integers(3), rng.integers(3), 0,
+                          int(use_ok and rng.random() < self.slip_use), 0], np.int64)
+        return spec.heads_to_buttons(heads)
 
     # ---- reports ---------------------------------------------------------------------------------
     def pose_estimate(self):
@@ -178,9 +224,10 @@ class TeacherPolicy:
         out.update(step=self.step - 1, budget=self.budget, pose=self.pose_estimate(), exit_step=self.exit_step,
                    leave_step=self.leave_step, leave_travel=self.leave_travel, leave_last=self.leave_last,
                    leave_route=self.leave_route,
-                   exit_known=t.exit_known, errors=t.errors, last_error=t.last_error, searches=t.searches,
+                   exit_known=t.exit_known, grid_fits=t.grid_fits, errors=t.errors, last_error=t.last_error, searches=t.searches,
                    replans=t.replans, failed_locks=dict(t.failed),
                    label_ms=1000.0 * self.label_seconds / max(1, self.step),
                    front_ms=1000.0 * self.front_seconds / max(1, self.step),
-                   subgoal_steps={n: int(c) for n, c in zip(spec.SUBGOALS, self.counts)}, mode_steps=dict(self.modes))
+                   subgoal_steps={n: int(c) for n, c in zip(spec.SUBGOALS, self.counts)}, mode_steps=dict(self.modes),
+                   slipped=self.slipped, use_masked=self.use_masked, labelled=self.labelled, unstuck=t.unstuck)
         return out

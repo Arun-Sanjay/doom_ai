@@ -9,8 +9,8 @@ frame's x axis and j along its y axis, the agent in cell (32, 32). A flat cell i
 every array is computed from the eleven channels of `MemoryMap.crop`.
 
 Cell classes
-    plain    observed free floor with nothing special on it: `CH_FREE` and not `CH_WALL`, no closed
-             door, no exit pad that is being kept clear
+    plain    observed free floor with nothing special on it: `CH_FREE` and not `CH_WALL`, or a cell
+             the agent has stood in (`CH_VISITED`); no closed door, no exit pad that is being kept clear
     door     a closed ordinary door was last seen here (`CH_DOOR`): can be crossed at extra cost
     locked   a closed locked door was last seen here (`CH_LOCKED`): can be crossed only while the
              caller says so (a key is held and the door has not been given up)
@@ -68,13 +68,15 @@ class PlanGrid:
 
     `locked_ok` is a boolean array (N, N) saying which locked-door cells may be crossed now.
     `pad_floor` is the exit belief from which a floor cell is kept clear as a pad (EXIT_SEEN: one
-    sighting is enough; EXIT_SURE: confirmed by a second sighting). The outermost ring of the grid is never
+    sighting is enough; EXIT_SURE: confirmed by a second sighting). `not_pad` is a boolean array (N, N)
+    of cells that are not the exit although the belief may say so (the agent has stood in them and
+    the episode went on). The outermost ring of the grid is never
     passable, so the search can step to a neighbour by adding to the flat index without a bounds
     check; maps are at most 28 cells across and the agent sits at 32, so nothing real is lost.
     """
 
     def __init__(self, crop: np.ndarray, locked_ok: np.ndarray | None = None, door_steps: float = 13.0,
-                 pad_floor: float = EXIT_SEEN):
+                 pad_floor: float = EXIT_SEEN, not_pad: np.ndarray | None = None):
         free = crop[spec.CH_FREE] > 0.5
         wall = crop[spec.CH_WALL] > 0.5
         locked = (crop[spec.CH_LOCKED] > 0.5) & ~wall
@@ -84,6 +86,8 @@ class PlanGrid:
         self.unknown = ~(free | wall | door | locked)
         belief = crop[spec.CH_EXIT]
         self.pad_seen = belief >= EXIT_SEEN
+        if not_pad is not None:                           # cells known not to be the exit whatever the belief says
+            self.pad_seen &= ~not_pad
         # Confirmed: seen here, and at least twice in this cell and the eight around it together
         # (a detector places a far pad a cell off now and then; false detections do not cluster).
         rows = belief.copy()
@@ -97,7 +101,9 @@ class PlanGrid:
         self.item = crop[spec.CH_ITEM] > 0.5
         self.recency = crop[spec.CH_RECENCY]
 
-        floor = free & ~wall & ~door & ~locked
+        # A cell the agent has stood in is floor whatever else was seen in it (a wall point that a
+        # pose error put on the wrong side of a wall face must not close a corridor already walked).
+        floor = ((free & ~wall) | self.visited) & ~door & ~locked
         floor[CENTER, CENTER] = True                      # the agent is standing there
         pad = (self.pad_sure if pad_floor >= EXIT_SURE else self.pad_seen) & floor
         pad[CENTER, CENTER] = False

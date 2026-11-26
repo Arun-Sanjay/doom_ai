@@ -13,17 +13,24 @@ in the rollout and in the loss alike, so a masked choice has probability exactly
 
 **Loss** (minimised; means are over all samples of a minibatch unless stated):
 
-    L = L_pi + vf_coef * L_v + vf_int_coef * L_v_int - sum_k ent_coef_k * ent_scale * H_k + w_distill * L_distill
+    L = L_pi + vf_coef * L_v + vf_int_coef * L_v_int - sum_k ent_coef_k * ent_scale * H_k
+        + w_distill * (L_distill + field_coef * L_field)
 
     ratio     = exp(log pi_new - log pi_old)
     A         = normalised (A_ext + int_coef * A_int)                       (two GAE streams, see buffer.py)
-    L_pi      = -mean(min(ratio * A, clip(ratio, 1 - clip, 1 + clip) * A))
+    L_pi      = -mean(min(ratio * A, clip(ratio, 1 - clip, 1 + clip) * A))  over the steps the policy chose itself
+                (steps on which the teacher's action was executed are off-policy: they are left out
+                of this term and kept in every other one)
     L_v       = 0.5 * mean(max((V - R)^2, (V_old + clip(V - V_old, +-value_clip) - R)^2))
     L_v_int   = the same for the intrinsic value head and the intrinsic return
                 (V and R of each stream in units of that stream's running return mean and std)
     H_k       = mean entropy of head k (six controller heads; sub-goal and target over manager steps)
     L_distill = sum_h d_h * CE(pi_h, teacher a_h) + d_sub * CE(pi_sub, teacher g) + d_tgt * CE(pi_tgt, teacher c)
-                over steps whose label mask is set (manager terms over labelled manager steps)
+                each head over the steps on which that head is labelled, the manager terms over
+                labelled manager steps; a label the action mask forbids is skipped
+    L_field   = mean squared error between the network's value field and field_gamma ** (the teacher's
+                travel steps to the target) on manager steps where the teacher's field is valid and
+                the target in force is the teacher's (reachable and unreachable cells averaged apart)
 
 Gradients are clipped by global norm. The learning rate and the entropy scale follow linear
 schedules; ``w_distill`` comes from a ``DistillSchedule`` that only steps down while the held-out
@@ -72,10 +79,21 @@ class PPOConfig:
     chunk: int = 16                      # truncated-BPTT length
     minibatch_chunks: int = 256          # chunks per minibatch (samples = this * chunk)
     target_kl: float | None = None       # stop the epochs of an update early above 1.5 * this
+    # The same, measured only on the steps the policy chose itself and the teacher has no controller
+    # label for (fights, and maps without labels). The distillation terms are not meant to change the
+    # policy there, but they reach it through the shared layers; a run that starts from a trained
+    # combat policy would otherwise lose it in its first updates (measured: KL 5 after 9 gradient
+    # steps). With this limit an update ends as soon as those steps have moved this far.
+    target_kl_unlabelled: float | None = None
+    lr_warmup: int = 0                   # updates over which the learning rate rises linearly from lr / lr_warmup
     # Distillation weights per controller head, then manager sub-goal and target. The target is a
     # 4096-way choice (cross-entropy ln 4096 = 8.3 at the start), so it is weighted down to the
     # scale of the other terms.
     distill_coef: tuple = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.25)
+    # Auxiliary loss on the value-propagation output (L_field above); it is scaled by the distillation
+    # weight like the other teacher terms. field_gamma ** steps is the target value of a cell.
+    field_coef: float = 1.0
+    field_gamma: float = 0.95
 
 
 # ---------------------------------------------------------------------------------------------
@@ -150,17 +168,24 @@ def step_summary(out: dict, masks, run_manager):
     return torch.cat(logps + [tail], -1)
 
 
-def sample_from_summary(summary, generator=None, greedy_heads: tuple = ()):
+def sample_from_summary(summary, generator=None, greedy_heads: tuple = (), override=None):
     """Sample the six heads from a ``step_summary`` on the CPU.
 
     Returns (heads (B, 6) long, joint logp (B,), value, value_int, subgoal long, target long).
     Heads listed in ``greedy_heads`` take their most likely option instead of a sample.
+    ``override = (labels (B, 6), mask (B, 6) bool)`` replaces the sampled option by ``labels`` where
+    ``mask`` is set (the teacher's action), except where the policy gives that option probability
+    zero (the action mask forbids it). ``logp`` is the policy's log-probability of the result.
     """
     n = sum(spec.HEAD_SIZES)
     tables = list(summary[:, :n].split(spec.HEAD_SIZES, -1))
     heads = torch.stack([torch.multinomial(lp.exp(), 1, generator=generator).squeeze(-1) for lp in tables], -1)
     for h in greedy_heads:
         heads[:, h] = tables[h].argmax(-1)
+    if override is not None:
+        labels, mask = override[0].long(), override[1].bool()
+        allowed = torch.stack([torch.isfinite(lp.gather(-1, labels[:, h:h + 1]).squeeze(-1)) for h, lp in enumerate(tables)], -1)
+        heads = torch.where(mask & allowed, labels, heads)
     logp = joint_log_prob(tables, heads, summary[:, n])
     return heads, logp, summary[:, n + 1], summary[:, n + 2], summary[:, n + 3].long(), summary[:, n + 4].long()
 
@@ -211,6 +236,8 @@ def unroll(policy, layout: StateLayout, batch: dict, by_steps: bool = False) -> 
                           masks=batch["masks"], run_manager=run_manager, forced=forced, sample=False, reset=start)
         flat = {k: out[k].flatten(0, 1) for k in _REPLAY_KEYS}
         flat["logits"] = [lg.flatten(0, 1) for lg in out["logits"]]
+        if "value_field" in out:
+            flat["value_field"] = out["value_field"].flatten(0, 1)
     else:
         initial = policy.initial_state(B, batch["step"].device)
         outs = []
@@ -222,8 +249,12 @@ def unroll(policy, layout: StateLayout, batch: dict, by_steps: bool = False) -> 
             outs.append(out)
         flat = {k: torch.stack([o[k] for o in outs], 1).flatten(0, 1) for k in _REPLAY_KEYS}
         flat["logits"] = [torch.stack([o["logits"][h] for o in outs], 1).flatten(0, 1) for h in range(len(spec.HEAD_SIZES))]
+        if "value_field" in outs[0]:
+            flat["value_field"] = torch.stack([o["value_field"] for o in outs], 1).flatten(0, 1)
     new = evaluate(flat, batch["masks"].flatten(0, 1), batch["actions"].flatten(0, 1), run_manager.flatten())
     new["value"], new["value_int"] = flat["value"], flat["value_int"]
+    if "value_field" in flat:
+        new["value_field"] = flat["value_field"]          # (B * L, 1, 64, 64), in the frame of its manager step
     return new
 
 
@@ -239,16 +270,37 @@ def _cross_entropy(logp_table, labels, mask):
     return _masked_mean(-lp.masked_fill(~ok, 0.0), ok)
 
 
+def _agreement(logp_table, labels, mask):
+    """(matches, count) of the most likely option against ``labels`` over ``mask``."""
+    hit = (logp_table.argmax(-1) == labels) & mask
+    return hit.sum(), mask.sum()
+
+
+def field_loss(value_field, steps, gamma: float):
+    """Mean squared error between value fields (M, 1, 64, 64) and ``gamma ** steps`` (steps (M, 64, 64)).
+
+    ``steps`` are the teacher's travel steps to the target; a cell at the cap (255) has no known
+    route and its target value is 0. Cells with a route are few next to the others in a 64 x 64
+    crop, so the two groups are averaged separately and the two means added.
+    """
+    pred = value_field.flatten(1).float()
+    steps = steps.flatten(1).float()
+    reach = steps < 255.0
+    err = (pred - torch.where(reach, gamma ** steps, torch.zeros_like(steps))) ** 2
+    return _masked_mean(err, reach) + _masked_mean(err, ~reach)
+
+
 def ppo_loss(new: dict, batch: dict, cfg: PPOConfig, ent_scale: float = 1.0, distill_weight: float = 0.0):
     """The loss of the module docstring for one minibatch. Returns (scalar loss, dict of float stats)."""
     flat = lambda k: batch[k].flatten(0, 1)
     adv, ret, ret_int = flat("adv"), flat("ret"), flat("ret_int")
     old_logp, old_v, old_v_int = flat("logp"), flat("value"), flat("value_int")
     manager = flat("step") % spec.MANAGER_PERIOD == 0
+    own = ~flat("forced") if "forced" in batch else torch.ones_like(manager)     # steps the policy chose itself
 
-    log_ratio = new["logp"] - old_logp
+    log_ratio = torch.where(own, new["logp"] - old_logp, torch.zeros_like(old_logp))
     ratio = log_ratio.exp()
-    pi_loss = -torch.min(ratio * adv, ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip) * adv).mean()
+    pi_loss = -_masked_mean(torch.min(ratio * adv, ratio.clamp(1.0 - cfg.clip, 1.0 + cfg.clip) * adv), own)
 
     def value_loss(v, v_old, target):
         err = (v - target) ** 2
@@ -267,25 +319,62 @@ def ppo_loss(new: dict, batch: dict, cfg: PPOConfig, ent_scale: float = 1.0, dis
     all_ent = torch.cat([head_ent, mgr_ent])
     ent_bonus = (all_ent * torch.tensor(cfg.ent_coef, device=ent.device, dtype=ent.dtype)).sum() * ent_scale
 
+    # ---- teacher terms: cross-entropy per labelled head, sub-goal and target, and the value field
     labelled = flat("lab_mask")
-    distill = torch.zeros((), device=ent.device)
-    if distill_weight > 0 and bool(labelled.any()):
-        lab_heads = flat("lab_heads").long()
-        d = cfg.distill_coef
+    head_mask = flat("lab_head_mask") if "lab_head_mask" in batch else labelled[:, None].expand(-1, n_heads)
+    both = (flat("lab_mgr") if "lab_mgr" in batch else labelled) & manager
+    zero = torch.zeros((), device=ent.device)
+    d_heads, d_sub, d_tgt, d_field = zero, zero, zero, zero
+    field_rows = zero
+    d = cfg.distill_coef
+    lab_heads = flat("lab_heads").long()
+    lab_sub, lab_tgt = flat("lab_subgoal").long(), flat("lab_target").long()
+    if bool(head_mask.any()):
         for h in range(n_heads):
-            distill = distill + d[h] * _cross_entropy(new["head_logp"][h], lab_heads[:, h], labelled)
-        both = labelled & manager
-        distill = distill + d[n_heads] * _cross_entropy(new["subgoal_logp"], flat("lab_subgoal").long(), both)
-        distill = distill + d[n_heads + 1] * _cross_entropy(new["target_logp"], flat("lab_target").long(), both)
+            if d[h]:
+                d_heads = d_heads + d[h] * _cross_entropy(new["head_logp"][h], lab_heads[:, h], head_mask[:, h])
+    if bool(both.any()):
+        d_sub = _cross_entropy(new["subgoal_logp"], lab_sub, both)
+        d_tgt = _cross_entropy(new["target_logp"], lab_tgt, both)
+    if cfg.field_coef and "value_field" in new and "lab_field_ok" in batch:
+        rows = (manager & flat("lab_field_ok") & (flat("target") == lab_tgt)).nonzero().squeeze(1)
+        if rows.numel():
+            d_field = field_loss(new["value_field"].index_select(0, rows), flat("lab_field").index_select(0, rows), cfg.field_gamma)
+            field_rows = rows.numel() / manager.sum().clamp(min=1)
+    distill = d_heads + d[n_heads] * d_sub + d[n_heads + 1] * d_tgt
 
-    loss = pi_loss + cfg.vf_coef * v_loss + cfg.vf_int_coef * v_int_loss - ent_bonus + distill_weight * distill
+    loss = (pi_loss + cfg.vf_coef * v_loss + cfg.vf_int_coef * v_int_loss - ent_bonus
+            + distill_weight * (distill + cfg.field_coef * d_field))
 
     with torch.no_grad():
+        kl = _masked_mean(ratio - 1.0 - log_ratio, own)
         stats = {"loss": loss.item(), "loss_pi": pi_loss.item(), "loss_v": v_loss.item(), "loss_v_int": v_int_loss.item(),
-                 "loss_distill": distill.item(), "kl": (ratio - 1.0 - log_ratio).mean().item(),
-                 "clip_frac": ((ratio - 1.0).abs() > cfg.clip).float().mean().item(),
+                 "loss_distill": distill.item(), "loss_distill_heads": d_heads.item(), "loss_distill_subgoal": d_sub.item(),
+                 "loss_distill_target": d_tgt.item(), "loss_field": d_field.item(), "field_rows": float(field_rows),
+                 "kl": kl.item(), "clip_frac": _masked_mean(((ratio - 1.0).abs() > cfg.clip).float(), own).item(),
                  "ev": (1.0 - (ret - new["value"]).var() / ret.var().clamp(min=1e-8)).item(),
-                 "labelled": labelled.float().mean().item()}
+                 "labelled": labelled.float().mean().item(), "forced": 1.0 - own.float().mean().item()}
+        apart = own & ~labelled                       # own steps the teacher says nothing about: fights, unlabelled maps
+        if bool(apart.any()):
+            stats["kl_unlabelled"] = _masked_mean(ratio - 1.0 - log_ratio, apart).item()
+        # Agreement of the policy's most likely options with the teacher, where there is a label.
+        hits = [_agreement(new["head_logp"][h], lab_heads[:, h], head_mask[:, h]) for h in range(n_heads)]
+        n_labels = sum(c for _, c in hits)
+        if int(n_labels):
+            any_label = head_mask.any(-1)
+            wrong = torch.stack([(new["head_logp"][h].argmax(-1) != lab_heads[:, h]) & head_mask[:, h] for h in range(n_heads)], -1)
+            stats["agree"] = (sum(m for m, _ in hits) / n_labels).item()           # per labelled head
+            stats["agree_all"] = _masked_mean((~wrong.any(-1)).float(), any_label).item()   # every labelled head of a step
+            for h in (spec.HEAD_MOVE, spec.HEAD_STRAFE, spec.HEAD_TURN, spec.HEAD_USE):
+                if int(hits[h][1]):
+                    stats[f"agree_{spec.HEAD_NAMES[h]}"] = (hits[h][0] / hits[h][1]).item()
+        if bool(both.any()):
+            stats["agree_subgoal"] = _masked_mean((new["subgoal_logp"].argmax(-1) == lab_sub).float(), both).item()
+            best = new["target_logp"].argmax(-1)
+            stats["agree_target"] = _masked_mean((best == lab_tgt).float(), both).item()
+            size = spec.CROP_SIZE
+            off = torch.maximum((best // size - lab_tgt // size).abs(), (best % size - lab_tgt % size).abs())
+            stats["target_cells_off"] = _masked_mean(off.float(), both).item()   # distance in crop cells, larger axis
         stats.update({f"ent_{name}": all_ent[i].item() for i, name in enumerate(ENTROPY_NAMES)})
     return loss, stats
 
@@ -310,12 +399,16 @@ class DistillSchedule:
     * otherwise the weight holds; after ``patience`` such reports in a row it steps back up one
       level (the reference is kept, so the rate has to recover before the next step down).
 
-    With no reports the weight never changes: it is not annealed on a timer.
+    A rate below ``min_rate`` never steps the weight down: a policy that does not reach the exit
+    yet "holds" its rate trivially, and lowering the weight then would remove the teacher before
+    anything was learned from it. With no reports the weight never changes: it is not annealed on
+    a timer.
     """
 
     levels: tuple = (1.0, 0.5, 0.25, 0.1, 0.03, 0.0)
     tolerance: float = 0.03
     patience: int = 2
+    min_rate: float = 0.0
     index: int = 0
     reference: float | None = None
     bad_reports: int = 0
@@ -328,6 +421,9 @@ class DistillSchedule:
     def report(self, exit_rate: float | None) -> float:
         """Take one held-out exit rate (None = no measurement: hold) and return the new weight."""
         if exit_rate is None:
+            return self.weight
+        if exit_rate < self.min_rate and (self.reference is None or exit_rate >= self.reference - self.tolerance):
+            self.history.append((float(exit_rate), self.weight))       # not learned yet: hold
             return self.weight
         if self.reference is None or exit_rate >= self.reference - self.tolerance:
             self.bad_reports = 0
@@ -371,7 +467,8 @@ class PPO:
 
     @property
     def lr(self) -> float:
-        return self.cfg.lr * linear(1.0, self.cfg.lr_final, self.progress)
+        warm = min(1.0, (self.updates + 1) / self.cfg.lr_warmup) if self.cfg.lr_warmup > 0 else 1.0
+        return self.cfg.lr * linear(1.0, self.cfg.lr_final, self.progress) * warm
 
     @property
     def ent_scale(self) -> float:
@@ -386,6 +483,7 @@ class PPO:
             group["lr"] = self.lr
         params = [p for p in self.policy.parameters() if p.requires_grad]
         sums: dict[str, float] = {}
+        counts: dict[str, int] = {}                # a statistic that needs labels is absent from a minibatch without any
         n_batches, samples, stop = 0, 0, False
         for _ in range(cfg.epochs):
             for batch in buf.minibatches(cfg.minibatch_chunks, self.generator):
@@ -397,14 +495,18 @@ class PPO:
                 self.opt.step()
                 for k, v in stats.items():
                     sums[k] = sums.get(k, 0.0) + v
+                    counts[k] = counts.get(k, 0) + 1
                 n_batches += 1
                 samples += batch["step"].numel()
                 if cfg.target_kl is not None and stats["kl"] > 1.5 * cfg.target_kl:
                     stop = True
                     break
+                if cfg.target_kl_unlabelled is not None and stats.get("kl_unlabelled", 0.0) > 1.5 * cfg.target_kl_unlabelled:
+                    stop = True
+                    break
             if stop:
                 break
         self.updates += 1
-        out = {k: v / max(n_batches, 1) for k, v in sums.items()}
+        out = {k: v / counts[k] for k, v in sums.items()}
         out.update({"lr": self.lr, "ent_scale": self.ent_scale, "samples": samples, "minibatches": n_batches})
         return out

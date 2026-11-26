@@ -1,0 +1,113 @@
+Launching the unified run on the Linux box (96 worker processes x 12 environments, learner on CUDA)
+==============================================================================================
+
+Everything from the repository root on the box (/workspace/doom_ai), with the box's interpreter:
+
+    PY=/opt/venv/bin/python
+    CKPT=runs/combat_1/latest.pt        # the combat checkpoint to start from (any checkpoint of training.rl.train)
+
+0. Once: the maps of the held-out gate (the frozen dev suites rebuilt as WADs; a second for both)
+
+    $PY -m training.mapgen.cli --from-suite training/suites/dev_v1.jsonl     --out data/maps/dev
+    $PY -m training.mapgen.cli --from-suite training/suites/dev_nav_v1.jsonl --out data/maps/dev_nav
+
+1. Preflight, two iterations (about a minute): checks the teacher in the workers and the new log columns
+
+    $PY -u -m training.rl.train --maps data/maps/train/manifest.jsonl --config training/configs/unified_full.json \
+        --init $CKPT --workers 96 --envs-per-worker 12 --out runs/unified_preflight --max-iterations 2
+
+   It must print, in this order:
+     learner device: cuda (...)
+     initial weights from runs/combat_1/latest.pt
+       (before it, "WARNING: ... no provenance record" if the checkpoint was written before provenance records
+       existed: nothing then checks that the current network and front end still compute what it was trained with)
+     rollout: 1152 environments on 96 CPU worker processes, front end: doomnet, 1500 maps in tiers [0, 1, 2, 3, 4], 73728 steps per iteration
+     teacher: real; labels on 919 of 1500 maps (...); beta 1 -> 0.1 over 30000000 steps
+     it 1 steps 73728 stage nav | ... | beta 1.00 forced 0.5-0.7 agree ... CE ... field ...
+   "forced" is below 1 at beta 1 because off-grid maps and steps with a visible enemy are never mixed.
+
+2. The run
+
+    mkdir -p runs/unified_full_1
+    nohup $PY -u -m training.rl.train \
+        --maps data/maps/train/manifest.jsonl \
+        --config training/configs/unified_full.json \
+        --init $CKPT \
+        --heldout data/maps/dev/manifest.jsonl \
+        --workers 96 --envs-per-worker 12 \
+        --out runs/unified_full_1 > runs/unified_full_1/train.out 2>&1 &
+
+    tail -f runs/unified_full_1/train.out            # one line every 10 iterations, held-out lines, resets
+    # stop with a final checkpoint:   kill -TERM <pid of the python process>
+    # continue after a stop or a crash: the same command with  --resume runs/unified_full_1/latest.pt  in place of --init $CKPT
+
+   Unattended overnight: a failing environment is rebuilt inside its worker and a worker process that dies is
+   replaced (columns env_resets and worker_respawns), so neither ends the run. What still ends it (the learner
+   itself failing, or more worker replacements than the run allows) leaves latest.pt behind. This loop starts the
+   run and resumes it from latest.pt after any abnormal exit; a SIGTERM to the python process ends the run cleanly
+   (exit code 0) and the loop with it:
+
+    ARGS="--maps data/maps/train/manifest.jsonl --config training/configs/unified_full.json --heldout data/maps/dev/manifest.jsonl --workers 96 --envs-per-worker 12 --out runs/unified_full_1"
+    nohup bash -c "$PY -u -m training.rl.train $ARGS --init $CKPT || until $PY -u -m training.rl.train $ARGS --resume runs/unified_full_1/latest.pt; do sleep 30; done" \
+        > runs/unified_full_1/train.out 2>&1 &
+
+   (ckpt_NNNNNN.pt is kept every 25 iterations if latest.pt should ever be unusable.)
+
+   Navigation only (tiers 0, 2, 3; no arenas): --config training/configs/unified_nav.json and
+   --heldout data/maps/dev_nav/manifest.jsonl, same other arguments.
+
+   Memory: 1152 engines at about 35 MB, plus 384 more for about two minutes during each held-out
+   evaluation (every 150 iterations): about 55 GB at the peak. If that is too much, lower heldout_envs
+   and heldout_workers together in the config (tolerance 0.06 assumes at least 384 episodes; use 0.08 for 192).
+
+3. Columns of runs/unified_full_1/train_log.csv to watch (one row per iteration of 73,728 steps)
+
+   throughput and health
+     env_steps_per_s        the combat run made about 13,000; the labels cost a few percent of worker time (see
+                            training/logs/unified_smoke.txt), so expect 11,000 to 13,000
+     env_resets             rows restarted on a fresh map after an engine death or an exception (total of the run). The
+                            first 20 are printed with their error. A handful per night is fine; a steady climb is not
+     worker_respawns        worker processes replaced after dying; expected 0
+     odom_errors            odometry updates that raised (pose kept). Was the cause of two crashes of the combat run
+     teacher_errors         internal errors of the teacher (that step is not labelled); expected 0
+     kl, clip_frac, ev      PPO on the steps the policy chose itself (kl includes what distillation changes there)
+     kl_unlabelled, minibatches
+                            the change of the policy on fights and unlabelled maps per update, and how many of the 54
+                            minibatches ran before the update was ended by target_kl_unlabelled (0.02). Expect few
+                            minibatches for the first 50 to 100 iterations (the combat checkpoint is being taught
+                            without being overwritten), then all 54. If it stays at 1 to 3 for hours, raise the limit
+   the teacher terms
+     beta, forced           beta falls 1 -> 0.1 over the first 30 M steps (about 40 minutes); forced follows it, scaled by
+                            the share of labelled steps (column "labelled")
+     loss_distill_heads     sum of the controller heads' cross-entropies; about 40 at the start from a combat
+                            checkpoint (2.9 from a random start), falling to about 1.7
+     loss_distill_subgoal   from about 2 to below 0.5
+     loss_distill_target    from 8.3-8.8 (ln 4096 = 8.3) to below 2.5; the slowest of the three
+     loss_field             about 18 at the start from a combat checkpoint (0.7 from random), falling to about 0.02;
+                            field_rows is the share of manager steps it is applied on
+     agree, agree_all       share of labelled head choices (and of whole steps) where the policy's most likely option is
+                            the teacher's; agree_move / agree_strafe / agree_turn / agree_use per head. In the 25-minute
+                            laptop run agree reached 0.81-0.82 on mixed trajectories within 80,000 steps and stayed there
+     agree_subgoal, agree_target, target_cells_off     the manager; target_cells_off should fall below 2 cells
+   what the run is for
+     heldout_exit_rate, heldout_episodes, distill_weight
+                            every 150 iterations the policy alone plays 384 held-out episodes; the line
+                            "held-out: exit rate X over 384 episodes -> distillation weight W" is printed. W steps down
+                            only when X >= 0.3 (min_rate) and X has not dropped more than 0.06 since the last step down
+     exit_rate_t0..t4       recent exit rate per tier in training (while beta is high this is mostly the teacher's)
+     exit_rate_labelled / exit_rate_unlabelled
+                            training episodes with and without teacher labels. The unlabelled ones (start off the grid)
+                            are driven by the policy alone at every beta: the earliest sign that it navigates by itself
+     kills, kill_frac, death_rate
+                            combat must not be forgotten: kill_frac should stay near the combat run's level on the
+                            tiers with monsters (the tier mix changes with the curriculum stage, column "stage")
+     door_reversals         USE pressed twice on a rising door; should fall towards 0
+
+4. After the run
+
+    $PY -m training.rl.eval_alone --checkpoint runs/unified_full_1/latest.pt --maps data/maps/dev/manifest.jsonl --workers 16
+    $PY -m training.rl.export runs/unified_full_1/latest.pt --dest runs/unified_full_1/policy.pt \
+        --episode data/maps/dev/dev_v1_t2_000.wad
+   export writes the agent's weights format and, with --episode, starts a real DoomAgent on the file (no untrained
+   fallback) and plays one episode. Copy the file to submission/weights/policy.pt only after training/evaluate.py
+   --compare says it is better than what is there.

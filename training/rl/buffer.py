@@ -143,7 +143,7 @@ class StateLayout:
 
 
 NETWORK_INPUTS = ("rays", "ents", "ent_mask", "scal", "map")      # stored on the learner device
-_TRAIN_FIELDS = ("actions", "subgoal", "target", "logp", "value", "value_int", "adv", "ret", "ret_int")
+_TRAIN_FIELDS = ("actions", "subgoal", "target", "logp", "value", "value_int", "adv", "ret", "ret_int", "forced")
 
 
 class RolloutBuffer:
@@ -176,6 +176,9 @@ class RolloutBuffer:
         self.logp = z()
         self.value = z()
         self.value_int = z()
+        # True where the executed action (and, on a manager step, the manager's choice) was the teacher's
+        # and not the policy's own sample. ``logp`` is always the policy's log-probability of what was executed.
+        self.forced = z(dtype=torch.bool)
         # What happened.
         self.reward = z()
         self.reward_int = z()
@@ -214,7 +217,8 @@ class RolloutBuffer:
                 self.state[k] = torch.zeros((self.T // self.L, self.N, *v.shape[1:]), dtype=v.dtype, device=self.device)
             self.state[k][c, rows] = v.detach().to(self.device)
 
-    def put_action(self, t: int, rows: slice, actions, subgoal, target, logp, value, value_int) -> None:
+    def put_action(self, t: int, rows: slice, actions, subgoal, target, logp, value, value_int, forced=None) -> None:
+        self.forced[t, rows] = False if forced is None else forced
         self.actions[t, rows] = actions
         self.subgoal[t, rows] = subgoal
         self.target[t, rows] = target
@@ -262,7 +266,10 @@ class RolloutBuffer:
         self.ret, self.ret_int = ret, ret_int
         adv = adv_ext + int_coef * adv_int
         if normalise:
-            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+            own = adv[~self.forced]                 # the policy term uses only the steps the policy chose itself
+            if own.numel() < 2:
+                own = adv
+            adv = (adv - own.mean()) / (own.std() + 1e-8)
         self.adv = adv
         self._train = {k: v.to(self.device) for k, v in self.obs.items() if k not in NETWORK_INPUTS}
         self._train.update({k: getattr(self, k).to(self.device) for k in _TRAIN_FIELDS})

@@ -145,6 +145,7 @@ class HookedPolicy:
         if self.debug is not None:
             return self.debug(self)
         return {"subgoal": spec.SUBGOAL_INDEX["open_door"], "target": (C + 3) * spec.CROP_SIZE + (C - 1),
+                "target_origin": crop_origin(self.pose_estimate()),      # chosen anew at every step, in the current crop
                 "use_age": 3, "note": "hello", "heads": np.arange(6), "value_field": np.zeros((64, 64), np.float32)}
 
 
@@ -170,6 +171,62 @@ class Budgeted(R.ScriptPolicy):
 
     def debug_state(self) -> dict:
         return {"budget": self.budget}
+
+
+CORRIDOR = "#" * 22 + "\n#P" + "." * 19 + "#\n" + "#" * 22
+FAR_CELL, OTHER_CELL = (12, 3), (4, -3)                 # start-frame cells beside the corridor, clear of the agent's marker
+
+
+class Manager:
+    """Walks forward and reports a manager's target the way the submission's agent holds it: a cell is
+    chosen every `period` steps (and at the steps in `extra`) as an index into the crop of that step,
+    and the index is then reported unchanged until the next choice.
+
+    The cell is FAR_CELL (OTHER_CELL at the steps in `extra`), or `ahead` cells in front of the agent's
+    own cell, which gives the same index at every choice. `report` says what goes with the index:
+    nothing ("index"), the crop origin of the choice ("origin") or the start-frame cell ("cell").
+    `cells[t]` and `poses[t]` keep the cell meant and the pose estimate at step t.
+    """
+
+    def __init__(self, report: str = "index", period: int = spec.MANAGER_PERIOD, ahead: int | None = None, extra=(),
+                 pair: bool = False):
+        self.report, self.period, self.ahead, self.extra, self.pair = report, int(period), ahead, tuple(extra), pair
+        self.odometry, self.memory = Odometry(), MemoryMap()
+
+    def reset(self) -> None:
+        self.odometry.reset()
+        self.memory.reset()
+        self.prev, self.t, self.cells, self.poses = None, 0, [], []
+        self.origin, self.cell = (-C, -C), (0, 0)
+
+    def act(self, obs) -> np.ndarray:
+        if self.prev is not None:
+            self.odometry.update(self.prev, obs)
+        pose = tuple(float(v) for v in self.odometry.pose)
+        self.memory.update(pose, obs, self.prev, None, self.t)
+        if self.t % self.period == 0 or self.t in self.extra:
+            self.origin = crop_origin(pose)
+            if self.ahead is not None:
+                self.cell = (self.origin[0] + C + self.ahead, self.origin[1] + C + 3)
+            else:
+                self.cell = OTHER_CELL if self.t in self.extra else FAR_CELL
+        self.cells.append(self.cell)
+        self.poses.append(pose)
+        self.prev = np.array([1, 0, 0, 0, 0, 0, 0, 0, 0], np.int8)
+        self.t += 1
+        return self.prev
+
+    def pose_estimate(self):
+        return self.odometry.pose
+
+    def debug_state(self) -> dict:
+        i, j = self.cell[0] - self.origin[0], self.cell[1] - self.origin[1]
+        state = {"subgoal": "explore", "target": (i, j) if self.pair else i * spec.CROP_SIZE + j}
+        if self.report == "origin":
+            state["target_origin"] = self.origin
+        elif self.report == "cell":
+            state["target_cell"] = self.cell
+        return state
 
 
 class Wrapper:
@@ -335,7 +392,7 @@ def test_text_lines_fit_the_panel_at_extreme_values():
               "doors_total": 12, "locked_opened": 3, "locked_total": 3, "kills": 12, "monsters_total": 12, "health": 200.0,
               "damage_taken": 1234.0, "cells_visited": 456, "cells_total": 456, "has_exit": 1, "exit_visible_tic": 4200,
               "exit_dist_final": 1234.0, "stuck_rate": 0.99, "stuck_at_door_rate": 0.99, "door_reversals": 12, "score": -12.3}
-    f = frame_state(step=1050, steps_cap=1050, tic=4200, ticks=4200, subgoal="open_locked", target_text="(63,63)=self",
+    f = frame_state(step=1050, steps_cap=1050, tic=4200, ticks=4200, subgoal="open_locked", target_text="~(63,63)=self",
                     exit_believed=True, est=(-1234.5, -1234.5, -3.1), true=(-1234.5, -1234.5, -3.1), drift=1234.5,
                     heading_err=-179.9, pose_source="policy", totals=totals)
     lines = ["".join(text for text, _ in line) for line in D._info_lines(f)]
@@ -501,6 +558,7 @@ def test_policy_hooks_are_shown(tmp_path):
     assert row["odom_err_max"] < 1.0 and row["exit_believed_tic"] == 40          # the runner got the same hooks
     rows = trace_rows(summary)
     assert all(r["subgoal"] == "open_door" and (r["target_i"], r["target_j"]) == (str(C + 3), str(C - 1)) for r in rows)
+    assert all(r["target_ref"] == "origin" for r in rows)
     assert all(r["note"] == "hello  heads=(0,1,2,3,4,5)  use_age=3" and r["acted"] == "1" for r in rows)
     assert max(float(r["drift"]) for r in rows) == pytest.approx(row["odom_err_max"], abs=0.006)
     assert float(rows[-1]["est_x"]) > 100.0 and rows[-1]["pose_source"] == "policy"
@@ -549,6 +607,82 @@ def test_target_forms_follow_the_agent(tmp_path):
     row = summary["row"]                                        # the runner asks for the pose too and notes the failure; the policy plays on
     assert row["agent_error"] == "" and "pose_estimate()" in row["hook_error"] and "no pose" in row["hook_error"]
     assert all(r["acted"] == "1" for r in trace_rows(summary)) and float(trace_rows(summary)[-1]["est_x"]) > 100.0
+
+
+def target_boxes(sheet, steps: int) -> list:
+    """Bounding box (x0, y0, x1, y1) of the target-coloured pixels in the map picture of each panel of the final sheet."""
+    out = []
+    for k in range(min(steps, D.SHEET_PANELS)):
+        picture = np.asarray(sheet_panel(sheet, k))[:D.MAP_PX, D.RGB_W:D.RGB_W + D.MAP_PX]
+        ys, xs = np.nonzero((picture == D.C_TARGET).all(-1))
+        out.append((int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())) if len(xs) else None)
+    return out
+
+
+HELD_CASES = {
+    # the submission agent's form before it reported an origin: a fixed cell, chosen every MANAGER_PERIOD steps, index held
+    "index": (dict(report="index"), "held"),
+    "index as a pair": (dict(report="index", pair=True), "held"),
+    # every choice gives the same index (a cell 5 ahead of the agent), so only the manager period tells the choices apart
+    "same index at every choice": (dict(report="index", ahead=5), "held"),
+    # a choice made between two manager periods shows as a changed index
+    "choice out of step": (dict(report="index", extra=(11, 21)), "held"),
+    "origin": (dict(report="origin"), "origin"),
+    "origin, other period": (dict(report="origin", period=13, ahead=5), "origin"),
+    "cell": (dict(report="cell", period=13, extra=(3,)), "cell"),
+}
+
+
+@pytest.mark.parametrize("case", list(HELD_CASES))
+def test_held_target_stays_on_its_cell(tmp_path, case):
+    """A manager's target is an index into the crop of the step that chose it and is held while the agent walks on.
+
+    The box must stay on the cell that was meant, with the crop origin reported or without it; without
+    it the viewer says once that the place is inferred and marks the target.
+    """
+    kwargs, ref = HELD_CASES[case]
+    policy = Manager(**kwargs)
+    wad = udmf.write_wad(CORRIDOR, tmp_path / "corridor.wad")
+    summary = D.render_episode(Wrapper(policy), wad, tmp_path / "out", ticks=128, video="none")
+    rows = trace_rows(summary)
+    assert len(rows) == 32 and float(rows[-1]["est_x"]) > 850.0          # 14 cells walked: four manager periods
+    assert len({crop_origin(p) for p in policy.poses[8:16]}) >= 4        # the crop moves on while the index is held
+    origins = [crop_origin(pose) for pose in policy.poses]
+    shown = [(int(r["target_i"]) + o[0], int(r["target_j"]) + o[1]) for r, o in zip(rows, origins)]
+    assert shown == policy.cells, case
+    assert all(r["target_ref"] == ref for r in rows)
+    if ref == "held":
+        assert len(summary["warnings"]) == 1 and "target_origin" in summary["warnings"][0] and "guess" in summary["warnings"][0]
+    else:
+        assert summary["warnings"] == []
+    # the picture: in each of the last 16 panels the box is drawn around that cell and nowhere else
+    view = D.View(summary["view_cells"], summary["view_corner"])
+    boxes = target_boxes(summary["sheets"][1], len(rows))
+    for k, found in enumerate(boxes):
+        t = len(rows) - len(boxes) + k
+        frame = D._MapFrame(policy.poses[t], view)
+        x0, y0, x1, y1 = frame.cell_box(policy.cells[t][0] - frame.origin[0], policy.cells[t][1] - frame.origin[1])
+        assert found == (x0 - 1, y0 - 1, x1 + 1, y1 + 1), (case, t)
+
+
+def test_inferred_target_is_marked_on_the_panel():
+    lines = D._info_lines(frame_state(target_text="~(39,35)"))
+    assert "target ~(39,35)" in "".join(text for text, _ in lines[0])
+    rec = D.Recorder("unused", D.Probe(R.ScriptPolicy("F")))
+    own = [(-C, -C), (-C + 1, -C), (-C + 2, -C), (-C + 3, -C)]
+
+    def origin_at(t, target, k):                                # what _panel_state does with a target that has no origin
+        rec._held = rec._held_target(t, target, own[k])
+        return rec._held[2]
+
+    assert origin_at(8, (40, 32), 0) == own[0]                  # first report: the current crop
+    assert origin_at(9, (40, 32), 1) == own[0]                  # held: still the crop of step 8
+    assert origin_at(10, (41, 32), 2) == own[2]                 # the index changed: a new choice
+    assert origin_at(11, (41, 32), 3) == own[2]
+    assert origin_at(13, (41, 32), 3) == own[3]                 # a step without this report in between: start again
+    rec._held = None
+    assert origin_at(15, (41, 32), 1) == own[1] and origin_at(16, (41, 32), 2) == own[2]   # a manager period begins at 16
+    assert len(rec.warnings) == 1                               # said once
 
 
 def test_teacher_style_report_is_drawn(tmp_path):

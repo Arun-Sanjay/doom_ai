@@ -18,9 +18,10 @@ levels:
 Goal bottleneck. With strict_goal_bottleneck=True the controller receives exactly two things from
 the levels above it: the embedding of the sub-goal in force, and a 9 x 9 patch of the value field
 read around its own position and rotated into its own frame (as differences to the value at its
-own cell, scaled to unit size). It never sees the map, the map features or the target index. Rays, entities and scalars reach it directly, so fighting and local
-movement do not depend on the manager. No code reads the sub-goal or the target: clamping the
-sub-goal (clamp_subgoal) changes behaviour only because the learned controller is conditioned on it.
+own cell, times a fixed gain). It never sees the map, the map features or the target index. Rays,
+entities and scalars reach it directly, so fighting and local movement do not depend on the
+manager. No code reads the sub-goal or the target: clamping the sub-goal (clamp_subgoal) changes
+behaviour only because the learned controller is conditioned on it.
 
 Between manager steps the manager's output is held in the state. The crop is re-centred on the
 agent every step while the held value field stays in the frame of the step that produced it, so
@@ -53,6 +54,7 @@ CELLS = spec.CROP_SIZE * spec.CROP_SIZE          # 4096 pointer targets
 CENTER = spec.CROP_SIZE // 2                     # crop index of the agent's own cell
 PATCH_RADIUS = 4                                 # the controller reads the value field +-4 cells around itself
 LOCAL_RADIUS = 7                                 # raw-map window that contains every rotation of that patch
+GOAL_GAIN = 5.0                                  # fixed scale of that patch: about unit size for a freshly initialised field
 NEG_INF = float("-inf")
 
 _S = spec.SCALAR_INDEX
@@ -270,6 +272,7 @@ class PolicyNet(nn.Module):
         self.hidden, self.strict = hidden, strict_goal_bottleneck
         self.generator: torch.Generator | None = None    # optional private generator for the manager's sampling
         self._clamp: int | None = None
+        self._goal_feat: torch.Tensor | None = None      # value-field features of the last forward pass (diagnostics only)
 
         # ---- controller, part 1: sensors -> fused features (every step)
         # One circular pad of 5, then three unpadded convolutions: the same result as circular padding
@@ -434,16 +437,41 @@ class PolicyNet(nn.Module):
         return run, since, cell, sub, move
 
     # ------------------------------------------------------------------------------------ level 3b: controller
+    def _goal_patch(self, value_field, pos, sin, cos) -> torch.Tensor:
+        """The controller's read of the value field: value_field (N,1,64,64), pos (N,2) -> (N,81).
+
+        The controller reads the shape of the field around itself, not its level: differences to the
+        value at its own position (the middle sample), times the constant GOAL_GAIN. The read is
+        linear in the field on purpose. Dividing each patch by its own size instead (a per-sample
+        normalisation) makes the part of the patch that depends on the target shrink whenever
+        another part of the field grows, and early in training that silenced the whole channel
+        for some seeds; with a constant gain nothing else in the field can attenuate it.
+        """
+        patch = self.ego(value_field, pos, sin, cos).flatten(1)
+        mid = patch.shape[1] // 2
+        return (patch - patch[:, mid:mid + 1]) * GOAL_GAIN
+
+    def goal_channel_stats(self) -> dict:
+        """Health of the goal channel on the most recent forward pass, for training logs.
+
+        "goal_feat_std": standard deviation of each of the 64 value-field features across the rows
+        of the batch, averaged over the features. Close to zero means the controller received the
+        same thing whatever the manager chose (a dead goal channel). "goal_feat_alive": fraction of
+        the 64 features that were non-zero on at least one row. Both are 0.0 before any forward
+        pass, and the first is 0.0 for a single row.
+        """
+        feat = self._goal_feat
+        if feat is None or feat.shape[0] == 0:
+            return {"goal_feat_std": 0.0, "goal_feat_alive": 0.0}
+        spread = float(feat.float().std(0).mean()) if feat.shape[0] > 1 else 0.0
+        return {"goal_feat_std": spread, "goal_feat_alive": float((feat > 0).any(0).float().mean())}
+
     def _goal_features(self, subgoal, value_field, cell, scal, map, map_vec) -> torch.Tensor:
         """Everything the controller receives from the manager: sub-goal embedding and value-field patch."""
         sub, sin, cos = scal[:, _SUB], scal[:, _SIN:_SIN + 1], scal[:, _COS:_COS + 1]
-        patch = self.ego(value_field, CENTER + cell + sub, sin, cos).flatten(1)  # (N,81)
-        # The controller reads the shape of the field around itself, not its level or scale: differences
-        # to the value at its own position (the middle sample), divided by their root mean square.
-        mid = patch.shape[1] // 2
-        rise = patch - patch[:, mid:mid + 1]
-        rise = rise * torch.rsqrt(rise.square().mean(1, keepdim=True) + 1e-4)
-        parts = [self.subgoal_emb(subgoal), torch.relu(self.goal_fc(rise))]
+        feat = torch.relu(self.goal_fc(self._goal_patch(value_field, CENTER + cell + sub, sin, cos)))
+        self._goal_feat = feat.detach()                                          # kept for goal_channel_stats(); costs nothing
+        parts = [self.subgoal_emb(subgoal), feat]
         if not self.strict:                                                      # loosened: also a direct local map read
             lo, hi = CENTER - LOCAL_RADIUS, CENTER + LOCAL_RADIUS + 1
             window = _as_unit_float(map[:, :, lo:hi, lo:hi])

@@ -216,6 +216,31 @@ def test_label_is_unchanged_when_the_environment_is_withheld():
     assert replay.teacher.errors == 0
 
 
+def test_label_from_scalars_is_the_same_label():
+    """The step, the budget and the previous action are all in the encoder's scalar vector: a teacher
+    handed only the network's inputs gives the labels of a teacher handed them as arguments."""
+    wad = wad_of(KEY_THEN_LOCK)
+    env = make_env(wad, episode_ticks=2100, render_buffers=False)
+    obs, _ = env.reset(seed=0)
+    odom, mem, enc, by_args, by_scalars = Odometry(), MemoryMap(), Encoder(), Teacher(), Teacher()
+    prev, done, step = None, False, 0
+    while not done and step < 400:
+        if step > 0:
+            odom.update(prev, obs)
+        pose = (odom.x, odom.y, odom.theta)
+        mem.update(pose, obs, prev, None, step)
+        crop = mem.crop(pose)
+        scal = enc.encode(obs, pose, prev, step, 525.0, None)["scal"]
+        want = by_args.label(obs, crop, pose, scal, step, 525.0, prev)
+        got = by_scalars.label_from_scalars(obs, crop, pose, scal)
+        assert same_label(got, want), f"label differs at step {step}"
+        prev = spec.heads_to_buttons(want.heads)
+        obs, _, terminated, truncated, _ = env.step(prev)
+        done, step = terminated or truncated, step + 1
+    env.close()
+    assert step > 50 and by_args.errors == 0 and by_scalars.errors == 0
+
+
 def test_teacher_policy_touches_the_environment_only_through_the_exit_sensor():
     """With the exit sensor switched off the policy plays without ever being given an environment."""
     wad = wad_of(THREE_DOORS)
@@ -319,6 +344,7 @@ def test_reset_forgets_the_episode():
     front.teacher.reset()
     t = front.teacher
     assert t.plan is None and not t.failed and not t.presses and not t._key_cells and not t._looked.any()
+    assert not t._stood.any() and not t._dismissed.any() and not t._checks
     assert not t._doorways.any() and t._held == 0 and t.searches == 0
 
 
@@ -497,6 +523,329 @@ def test_leaves_for_the_exit_in_time():
     assert row["exit"] == 1 and row["cells_visited"] >= 60
 
 
+BEHIND_A_DOOR = "\n".join([
+    "#############",
+    "#P.....#....#",
+    "#......D..E.#",
+    "#......#....#",
+    "#############"])
+LONG_CORRIDOR = "###########\n#P.......E#\n###########"
+
+
+class TamperedSensor:
+    """Wraps the policy's exit sensor and adds false detections, placed with the policy's own pose estimate.
+
+    once=(step, forward, left): one false sighting on that step.
+    ghost=(x, y): a spot in the start frame that is reported as the exit whenever it is in view,
+    like a patch of red wall that fools a detector on every frame; it hides the real pad then.
+    """
+
+    def __init__(self, policy, once=None, ghost=None):
+        self.policy, self.inner, self.once, self.ghost = policy, policy.sensor, once, ghost
+        self.injected = 0
+
+    def attach(self, env, meta) -> None:
+        self.inner.attach(env, meta)
+
+    def seed(self, seed: int) -> None:
+        self.inner.seed(seed)
+
+    def read(self):
+        true = self.inner.read()
+        if self.once is not None and self.policy.step == self.once[0]:
+            self.injected += 1
+            return np.array([1.0, self.once[1] / spec.RAY_RANGE, self.once[2] / spec.RAY_RANGE], np.float32)
+        if self.ghost is not None:
+            x, y, theta = self.policy.pose_estimate()
+            dx, dy = self.ghost[0] - x, self.ghost[1] - y
+            fwd, left = dx * math.cos(theta) + dy * math.sin(theta), -dx * math.sin(theta) + dy * math.cos(theta)
+            if fwd > 16.0 and abs(left) <= 0.9 * fwd and math.hypot(fwd, left) <= 640.0:
+                self.injected += 1
+                return np.array([1.0, fwd / spec.RAY_RANGE, left / spec.RAY_RANGE], np.float32)
+        return true
+
+
+def play_tampered(grid_text: str, ticks: int = 2100, **tamper) -> tuple[dict, TeacherPolicy]:
+    policy = TeacherPolicy()
+    policy.sensor = TamperedSensor(policy, **tamper)
+    rows = run_episodes(policy, [{"wad": wad_of(grid_text), "id": "test", "episode_ticks": ticks}], workers=0,
+                        seeds=[0], record=GateRecorder(), render_buffers=False)
+    return rows[0], policy
+
+
+def test_a_single_false_exit_sighting_is_looked_at_again_and_dropped():
+    """One false detection on open floor: the teacher looks at the spot from close by, gets no second
+    sighting, drops it and goes on to the real exit behind the door."""
+    row, policy = play_tampered(BEHIND_A_DOOR, once=(4, 200.0, -60.0))
+    assert policy.sensor.injected == 1
+    assert row["exit"] == 1 and row["doors_opened"] == 1 and row["teacher_errors"] == 0
+    assert int(policy.teacher._dismissed.sum()) == 1
+    assert max(policy.teacher._checks.values()) == core.CHECK_LOOKS
+    plain, _ = play(BEHIND_A_DOOR)
+    assert row["steps"] <= plain["steps"] + 40          # the check costs a few steps, not a detour
+
+
+def test_a_persistent_false_exit_is_walked_over_once_and_then_ignored():
+    """A spot that the detector reports as the exit on every frame, in the only corridor, hiding the real
+    pad behind it: with nothing else to do the teacher goes there, stands on it, learns that the
+    episode goes on, and never treats that cell as the exit again."""
+    row, policy = play_tampered(LONG_CORRIDOR, ghost=(256.0, 0.0))
+    assert policy.sensor.injected > 10
+    assert row["exit"] == 1 and row["teacher_errors"] == 0, row["cause"]
+    assert policy.teacher._stood[4 + core.HALF, core.HALF]
+    assert row["steps"] < 200
+
+
+def test_use_is_never_asked_for_against_the_mask_and_a_slipping_driver_reverses_no_door():
+    """A stand-in for a student that drives: about four steps in ten are random (without USE). The
+    teacher keeps labelling, its USE labels never fall on a masked step, and no door is reversed."""
+    policy = TeacherPolicy(slip=0.15, slip_use=0.0)
+    rows = run_episodes(policy, [{"wad": wad_of(THREE_DOORS), "id": "test", "episode_ticks": 4200}], workers=0,
+                        seeds=[0, 1, 2], record=GateRecorder(), render_buffers=False)
+    for row in rows:
+        assert row["door_reversals"] == 0 and row["use_masked"] == 0 and row["teacher_errors"] == 0
+        assert row["slipped"] > 0.25 * row["steps"]
+    assert sum(r["exit"] for r in rows) >= 2
+    row, _ = play(THREE_DOORS)
+    assert row["use_masked"] == 0 and row["slipped"] == 0
+
+
+def test_view_range_follows_the_detector():
+    """A detector that only reaches 200 units: with `view_range` to match, the far end of the corridor is
+    not taken as inspected from the start, and the exit is still found."""
+    assert Teacher(view_range=10.0).view_range == 2 * grid.CELL and Teacher().view_range == core.VIEW_RANGE
+    policy = TeacherPolicy(exit_range=200.0, view_range=200.0)
+    rows = run_episodes(policy, [{"wad": wad_of(LONG_CORRIDOR), "id": "test", "episode_ticks": 2100}], workers=0,
+                        seeds=[0], record=GateRecorder(), render_buffers=False)
+    assert rows[0]["exit"] == 1 and rows[0]["teacher_errors"] == 0
+    assert rows[0]["exit_step"] > 10               # not known from the start cell, 512 units away
+
+
+# ------------------------------------------------------ review fixes: looking, patience, grid fit
+def open_rays(reach: float = 1024.0, wall_ahead: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Ray arrays of an empty space; with `wall_ahead` every ray inside the view ends on a wall that far away."""
+    dist = np.full(spec.NUM_RAYS, reach / spec.RAY_RANGE, np.float32)
+    hit = np.zeros(spec.NUM_RAYS, np.int64)
+    if wall_ahead is not None:
+        dist[core.VIEW_RAYS] = wall_ahead / spec.RAY_RANGE
+        hit[core.VIEW_RAYS] = spec.HIT_WALL
+    return dist, hit
+
+
+def looked_cells(teacher: Teacher, x: float, y: float, heading_deg: float, rays, times: int = core.LOOKS) -> set:
+    theta = math.radians(heading_deg)
+    for _ in range(times):
+        teacher._mark_looked(rays[0], rays[1], x, y, math.cos(theta), math.sin(theta))
+    return {(int(a) - core.HALF, int(b) - core.HALF) for a, b in np.argwhere(teacher._looked)}
+
+
+def test_a_cell_counts_as_looked_at_only_where_the_exit_sensor_would_see_a_pad():
+    """The exit labels report a pad whose centre is within 42 degrees of the view axis, in line of sight
+    and within range. The teacher's own record of what it has looked at must not be wider than that."""
+    seen = looked_cells(Teacher(), 0.0, 0.0, 0.0, open_rays())
+    assert {(1, 0), (5, 0), (9, 0), (2, 1), (2, -1), (5, 4), (5, -4)} <= seen
+    assert not seen & {(0, 0), (0, 1), (1, 1), (1, -1), (-1, 0), (10, 0), (5, 5)}     # own cell, 45 degrees or more, too far
+    for cx, cy in seen:                                                               # every one inside the sensor's cone
+        assert cx > 0 and abs(cy) <= cx * math.tan(math.radians(40.0)) + 1e-9 and math.hypot(cx, cy) * 64.0 <= core.VIEW_RANGE
+    # fewer looks than `looks` do not count (a detector that misses one frame in five)
+    assert not looked_cells(Teacher(), 0.0, 0.0, 0.0, open_rays(), times=core.LOOKS - 1)
+    # a wall 100 units ahead hides everything behind it
+    assert looked_cells(Teacher(), 0.0, 0.0, 0.0, open_rays(wall_ahead=100.0)) == {(1, 0)}
+    # The case from the review: the body 49 units from a pad centre that is 54 degrees off the view
+    # axis. The sensor returns nothing there, so the cell must not count as inspected.
+    theta = 0.0
+    px, py = 49.0 * math.cos(math.radians(54.0)), 49.0 * math.sin(math.radians(54.0))
+    teacher = Teacher()
+    assert (0, 0) not in looked_cells(teacher, -px, -py, math.degrees(theta), open_rays())
+    assert (0, 0) in looked_cells(teacher, -px, -py, 54.0 - 30.0, open_rays())          # turned to within 30 degrees: seen
+    # a detector with a shorter reach
+    assert max(cx for cx, _ in looked_cells(Teacher(view_range=200.0), 0.0, 0.0, 0.0, open_rays())) == 3
+
+
+def test_patience_runs_only_on_steps_that_executed_the_label():
+    """A driver that never does what the teacher asks: the teacher goes on asking, and none of its
+    patience counters runs out, so no cell is entered unseen and no door is given up."""
+    grid_text = "\n".join([
+        "###########",
+        "#P...#....#",
+        "#....D....#",
+        "#....#...E#",
+        "###########"])
+    wad = wad_of(grid_text)
+    env = make_env(wad, episode_ticks=2100, render_buffers=False)
+    obs, _ = env.reset(seed=0)
+    front = FrontEnd()
+    asked, still = [], np.zeros(spec.NUM_BUTTONS, np.int8)
+    for _ in range(120):
+        label = front.label(lean(obs), None, 525.0)
+        assert_valid(label)
+        asked.append((front.teacher.info.get("mode"), tuple(int(h) for h in label.heads)))
+        front.took(still)                                   # nothing of it is executed
+        obs, *_ = env.step(still)
+    env.close()
+    t = front.teacher
+    assert t.errors == 0
+    assert any(heads != (0, 0, 0, 0, 0, 0) for _, heads in asked)             # it did ask for something
+    assert not t._waived and not t._enter_cells and not t._left_alone and not t._probed
+    assert all(count == 0 or all(h == (0, 0, 0, 0, 0, 0) for _, h in asked) for _, count in t._patience.values())
+    assert asked[-1] == asked[40]                                             # same place, same request
+
+    # the counter itself: one step per executed label, none otherwise
+    t = Teacher()
+    t._followed = False
+    assert [t._spent("look", (3, 4)) for _ in range(5)] == [0] * 5
+    t._followed = True
+    assert [t._spent("look", (3, 4)) for _ in range(3)] == [1, 2, 3]
+    assert t._spent("look", (5, 5)) == 1                                      # another cell starts again
+    # `_followed` is read off the buttons that were executed
+    obs0 = {"vitals": np.zeros(spec.NUM_VITALS, np.float32),
+            "rays": {"distance": np.full(64, 0.2, np.float32), "hit_type": np.ones(64, np.int64)},
+            "visible_entities": {"mask": np.zeros(32, bool), "entity_type": np.zeros(32, np.int64),
+                                 "features": np.zeros((32, 8), np.float32)}}
+    crop = blank_crop()
+    scal = np.zeros(spec.SCALAR_DIM, np.float32)
+    first = t.label(obs0, crop, (0.0, 0.0, 0.0), scal, 0, 500.0, None)
+    assert t.errors == 0, t.last_error
+    assert not t._followed                                                    # no action led to the first observation
+    t.label(obs0, crop, (0.0, 0.0, 0.0), scal, 1, 500.0, spec.heads_to_buttons(first.heads))
+    assert t._followed
+    other = first.heads.copy()
+    other[spec.HEAD_TURN] = (int(other[spec.HEAD_TURN]) + 1) % 3
+    t.label(obs0, crop, (0.0, 0.0, 0.0), scal, 2, 500.0, spec.heads_to_buttons(other))
+    assert not t._followed
+
+
+def test_what_patience_gave_up_is_forgotten_again():
+    book = {(2, 3): 100}
+    assert Teacher._given_up(book, (2, 3), 100) and Teacher._given_up(book, (2, 3), 100 + core.GIVE_UP_STEPS)
+    assert not Teacher._given_up(book, (9, 9), 100)
+    assert not Teacher._given_up(book, (2, 3), 101 + core.GIVE_UP_STEPS) and not book      # expired and removed
+    assert core.GIVE_UP_STEPS > 4 * max(core.LOOK_PATIENCE, core.BLOCKED_PATIENCE) / 2     # long against the patience itself
+    t = Teacher()
+    t._waived[(1, 1)] = 5
+    t._enter_cells[(1, 2)] = 5
+    t._left_alone[(1, 3)] = 5
+    t._patience["look"] = [(1, 1), 7]
+    t.reset()
+    assert not t._waived and not t._enter_cells and not t._left_alone and not t._patience and t._asked is None
+
+
+def stalled_run(speed: float, follow: bool, steps: int = 40) -> tuple[Teacher, list]:
+    """Label a body that stays at the start of a known corridor whatever is pressed. `speed` is the
+    velocity the observation reports; with `follow` the action executed is the one the teacher asked for."""
+    crop = blank_crop()
+    crop[spec.CH_FREE, grid.CENTER:grid.CENTER + 7, grid.CENTER] = 1.0
+    crop[spec.CH_WALL, grid.CENTER - 1:grid.CENTER + 7, grid.CENTER - 1] = 1.0
+    crop[spec.CH_WALL, grid.CENTER - 1:grid.CENTER + 7, grid.CENTER + 1] = 1.0
+    crop[spec.CH_WALL, grid.CENTER - 1, grid.CENTER] = 1.0
+    vitals = np.zeros(spec.NUM_VITALS, np.float32)
+    vitals[14] = speed
+    obs = {"vitals": vitals, "rays": {"distance": np.full(64, 0.6, np.float32), "hit_type": np.zeros(64, np.int64)},
+           "visible_entities": {"mask": np.zeros(32, bool), "entity_type": np.zeros(32, np.int64),
+                                "features": np.zeros((32, 8), np.float32)}}
+    scal = np.zeros(spec.SCALAR_DIM, np.float32)
+    teacher, prev, modes = Teacher(), None, []
+    for step in range(steps):
+        label = teacher.label(obs, crop, (0.0, 0.0, 0.0), scal, step, 500.0, prev)
+        assert_valid(label)
+        modes.append((teacher.info.get("mode"), int(label.heads[spec.HEAD_MOVE]), int(label.heads[spec.HEAD_STRAFE])))
+        prev = spec.heads_to_buttons(label.heads) if follow else np.zeros(spec.NUM_BUTTONS, np.int8)
+    assert teacher.errors == 0, teacher.last_error
+    return teacher, modes
+
+
+def test_a_body_caught_on_a_corner_is_put_back_on_the_line():
+    """Pushed for STALL_STEPS executed steps and no speed reported: the teacher stops driving at the
+    waypoint and asks for the centre line of the route instead, for one step. Not when the body
+    moves, and not when the pushes were never executed."""
+    teacher, modes = stalled_run(speed=0.0, follow=True)
+    pushes = [bool(move or strafe) and mode in ("run", "slow") for mode, move, strafe in modes]
+    assert teacher.unstuck >= 1 and ("line", 0, 0) in modes
+    first = modes.index(("line", 0, 0))
+    assert first >= core.STALL_STEPS and all(pushes[first - core.STALL_STEPS:first])      # only after that many pushes
+    moving, modes = stalled_run(speed=4.0, follow=True)
+    assert moving.unstuck == 0 and any(mode in ("run", "slow") for mode, _, _ in modes)
+    ignored, modes = stalled_run(speed=0.0, follow=False)
+    assert ignored.unstuck == 0 and any(mode in ("run", "slow") for mode, _, _ in modes)
+
+
+def test_a_door_that_reads_out_of_reach_is_closed_in_on():
+    """The body has come to rest where the map says the door is opened from, but the pose estimate is
+    14 units off along the door's axis and the forward ray reads the door 68 units away, beyond the
+    press range. Waiting would last for ever: the body is placed by the ray instead and ends up in reach."""
+    wait = lambda along, v, door_ahead=None: steer.wait_at_door(along, 0.0, 1.0, 0.0, v, 0.0, 0.0, 0.0, 1.0, 0.0, False, door_ahead)
+    assert wait(-22.0, 0.0) == (steer.NONE, steer.NONE)                   # in the zone by the estimate: nothing to do
+    assert wait(-22.0, 0.0, 68.0) == (steer.FIRST, steer.NONE)            # ... unless the ray says the door is out of reach
+    assert wait(-40.0, 0.0) == (steer.FIRST, steer.NONE)                  # behind the zone: move up, as before
+    error = 14.0                                                           # true distance to the door face = 32 - along + error
+    along, v, reads = -22.0, 0.0, []
+    for _ in range(30):
+        ahead = grid.CELL / 2 - along + error
+        reads.append(ahead)
+        gap = ahead - (grid.CELL / 2 - along)                             # the rule of core.Teacher._steer
+        far = ahead if core.DOOR_GAP < gap <= grid.CELL / 2 else None
+        move, strafe = wait(along, v, far)
+        assert strafe == steer.NONE
+        moved, v = steer.advance(v, {steer.NONE: 0, steer.FIRST: 1, steer.SECOND: -1}[move])
+        along += moved
+    assert reads[0] > core.USE_PRESS_RANGE
+    assert all(r <= core.USE_PRESS_RANGE for r in reads[8:]), reads           # in reach within eight steps, and stays there
+    assert min(reads) > 16.0 + 4.0                                            # never leaning on the door (the body is 16 wide)
+
+
+@pytest.mark.parametrize("options,fits", [({}, True), ({"start_angle": 180}, True), ({"start_angle": 270}, True),
+                                          ({"start_offset": [7, -5]}, False), ({"start_offset": [0, 1]}, False),
+                                          ({"start_angle": 33}, False), ({"start_angle": 91, "start_offset": [3, 0]}, False)])
+def test_no_controller_labels_when_the_grid_does_not_fit_the_map(options, fits):
+    """A start that is shifted inside its cell or turned off the axes puts the walls off the teacher's
+    64-unit cells. The teacher sees that in its first observation and labels no head for the episode;
+    `gate.start_on_grid` says the same from the build options."""
+    assert gate.start_on_grid(options) is fits
+    wad = wad_of(KEY_THEN_LOCK, **options)
+    env = make_env(wad, episode_ticks=400, render_buffers=False)
+    obs, _ = env.reset(seed=0)
+    front = FrontEnd()
+    for step in range(12):
+        label = front.label(lean(obs), None, 100.0)
+        assert_valid(label)
+        assert front.teacher.grid_fits is fits
+        if fits:
+            assert label.head_mask.tolist() == [True, True, True, False, True, False]
+        else:
+            assert not label.head_mask.any() and not label.field_valid
+        action = spec.heads_to_buttons(label.heads)
+        front.took(action)
+        obs, *_ = env.step(action)
+    env.close()
+    assert front.teacher.errors == 0
+    front.teacher.reset()
+    assert front.teacher.grid_fits
+
+
+def test_gate_tells_stored_starts_on_and_off_the_grid_apart(tmp_path):
+    """`--start keep` plays the maps as a training manifest stores them and marks which of them the
+    teacher can label; the default strips the start options, so every map is on the grid."""
+    rows = [{"name": "a", "tier": 2, "episode_ticks": 2100, "grid": THREE_DOORS, "options": {}},
+            {"name": "b", "tier": 2, "episode_ticks": 2100, "grid": THREE_DOORS, "options": {"start_angle": 90}},
+            {"name": "c", "tier": 2, "episode_ticks": 2100, "grid": THREE_DOORS, "options": {"start_offset": [4, 0]}},
+            {"name": "d", "tier": 3, "episode_ticks": 2100, "grid": THREE_DOORS, "options": {"start_angle": 45}}]
+    suite = tmp_path / "mini.jsonl"
+    suite.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    kept = gate.bare_maps(suite, start="keep", out_dir=tmp_path)
+    assert [m["on_grid"] for m in kept] == [True, True, False, False]
+    assert all(m["on_grid"] for m in gate.bare_maps(suite, start="aligned", out_dir=tmp_path))
+    assert not gate.start_on_grid({"start_angle": 54}) and gate.start_on_grid(None)
+    # the table of a mixed run: one group of rows for all episodes, then the two parts
+    base = {"has_exit": 1, "sectors_visited": 4, "sectors_total": 4, "doors_opened": 3, "doors_total": 3, "locked_opened": 0,
+            "locked_total": 0, "keys_picked": 0, "keys_total": 0, "door_reversals": 0, "stuck_rate": 0.0,
+            "stuck_at_door_rate": 0.0, "steps": 100, "episode_ticks": 2100, "odom_err_max": 0.1, "labelled": 100}
+    played = [{**base, "tier": 2, "exit": 1, "on_grid": 1}, {**base, "tier": 2, "exit": 0, "on_grid": 0, "labelled": 0}]
+    table = gate.gate_table([r for r in played if r["on_grid"]])
+    assert table[0]["exit_rate"] == 1.0 and table[0]["labelled_frac"] == 1.0
+    assert gate.gate_table([r for r in played if not r["on_grid"]])[0]["labelled_frac"] == 0.0
+    assert gate.gate_table(played)[0]["exit_rate"] == 0.5
+
+
 def test_teacher_policy_reports():
     row, policy = play(THREE_DOORS)
     state = policy.debug_state()
@@ -555,3 +904,30 @@ def test_gate_with_noisy_exit_observations():
     for tier, floor in gate.GATE_EXIT.items():
         assert by_tier[tier]["exit_rate"] >= floor - 0.05, (tier, by_tier[tier]["exit_rate"])
     assert by_tier["all"]["door_reversals"] == 0 and by_tier["all"]["teacher_errors"] == 0
+
+
+@pytest.mark.slow
+def test_gate_with_stored_starts_labels_only_the_maps_the_grid_fits(tmp_path):
+    """`--start keep`, the condition of the training set: eight dev maps, every second one stored with a
+    start that is shifted or turned off the axes. The teacher labels the maps its grid fits, and only
+    those; the table reports the two parts apart."""
+    rows = []
+    for line in (ROOT / "training" / "suites" / "dev_v1.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        if row["tier"] == 2 and len(rows) < 8:
+            options = {k: v for k, v in (row.get("options") or {}).items() if k not in ("start_angle", "start_offset")}
+            options.update([{}, {"start_offset": [9, -6]}, {"start_angle": 180}, {"start_angle": 37}][len(rows) % 4])
+            rows.append({**row, "options": options})
+    suite = tmp_path / "keep_mix.jsonl"
+    suite.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    played, table = gate.run_gate("pytest_keep", suite=suite, tiers=(2,), start="keep", workers=3, log=False, quiet=True)
+    on = [r for r in played if r["on_grid"]]
+    off = [r for r in played if not r["on_grid"]]
+    assert len(on) == 4 and len(off) == 4
+    assert all(r["grid_fits"] == r["on_grid"] for r in played)              # the teacher's own check, from its first observation
+    assert all(r["labelled"] == 0 for r in off)
+    assert all(r["labelled"] > 0.9 * r["steps"] for r in on)
+    assert sum(r["exit"] for r in on) >= 3 and all(r["teacher_errors"] == 0 for r in played)
+    assert [row["start"] for row in table] == ["keep"] * 2 + ["keep:on-grid"] * 2 + ["keep:off-grid"] * 2
+    by_part = {row["start"]: row for row in table if row["tier"] == 2}
+    assert by_part["keep:on-grid"]["labelled_frac"] > 0.9 and by_part["keep:off-grid"]["labelled_frac"] == 0.0

@@ -25,6 +25,8 @@ What must hold (docs/CONTRACT.md section 6, and the agent's own rule that act() 
     * act() never raises and always returns nine values that the scorer's own check accepts;
     * reset() may be called at any time, also in the middle of an episode, and afterwards the agent
       works normally again;
+    * a bad observation costs at most the decision it arrives on: the agent goes on pressing
+      buttons on the ordinary observations that follow, without waiting for reset();
     * decisions in a row without reset() are handled for longer than any map lasts: 1,060 in the
       fast tests (the longest map has 1,050) and 1,200 in a test marked slow;
     * act() stays within the time budget on ordinary and on odd inputs: its mean within the budget
@@ -41,7 +43,8 @@ observations also require at least one pressed button, and so do the odd observa
 engine can really produce (PLAUSIBLE), such as 32 visible enemies or no ray hitting anything.
 
 The last part of the file checks the checks: stand-in agents with one known defect each (a
-constructor that raises, a buffer shorter than the longest map, a steady 42 ms per call) must fail.
+constructor that raises, a buffer shorter than the longest map, silence after one NaN until
+reset(), a steady 42 ms per call, a try at the GPU with a fallback) must fail.
 
 Run as a script (`python test_fuzz.py DEVICE`) this file is the device check used by one of the tests.
 """
@@ -609,6 +612,31 @@ def test_reset_mid_episode(agent, capsys):
                          "it is failing on every step, or reset() did not clear the bad state" + clue(agent))
 
 
+BAD_INPUTS = ("vitals all NaN", "ray distance NaN", "entity features NaN and inf", "float32 index fields")
+
+
+def presses_after_bad_input(agent, seed: int) -> int:
+    """Feed the kinds of BAD_INPUTS in mid-episode, then LIVENESS_STEPS ordinary observations with no
+    reset() in between. Returns how many of the ordinary ones were answered with a pressed button."""
+    rng = np.random.default_rng(seed)
+    agent.reset()
+    presses(agent, rng, 10, "before the bad observations")
+    for name in BAD_INPUTS:
+        obs = ordinary(rng)
+        ODD[name](obs, rng)
+        act(agent, obs, f"{name}, in mid-episode")
+    return presses(agent, rng, LIVENESS_STEPS, "after bad observations, without reset()")
+
+
+def test_agent_keeps_acting_after_bad_input_without_reset(agent, capsys):
+    """A bad observation may cost the decision it arrives on, never the rest of the map: the scorer
+    calls reset() only between maps, so an agent that stays silent until then stands still for good."""
+    pressed = presses_after_bad_input(agent, 13)
+    report(capsys, f"after NaN and wrong-dtype observations, without reset(): {pressed} of {LIVENESS_STEPS} actions press a button")
+    assert pressed > 0, (f"after bad observations the agent answered {LIVENESS_STEPS} ordinary ones with all zeros: "
+                         "its state stays broken until reset()" + clue(agent))
+
+
 def timed_run(agent, seed: int, steps: int) -> tuple[np.ndarray, np.ndarray]:
     """`steps` timed act() calls after a warm-up, every second observation odd.
 
@@ -895,6 +923,24 @@ class DoomAgent(Base):
         return super().act(observation)
 '''
 
+SILENT_AFTER_NAN = STAND_IN + '''
+
+class DoomAgent(Base):
+    """One NaN observation and every later answer is all zeros, until reset()."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.broken = False
+
+    def reset(self):
+        super().reset()
+        self.broken = False
+
+    def act(self, observation):
+        self.broken = self.broken or not np.isfinite(observation["vitals"]).all()
+        return np.zeros(9, np.int8) if self.broken else super().act(observation)
+'''
+
 TRIES_THE_GPU = '''import numpy as np
 import torch
 
@@ -948,6 +994,18 @@ def test_long_run_catches_a_buffer_shorter_than_the_longest_map(tmp_path):
     try:
         with pytest.raises(AssertionError, match=rf"IndexError.*step 700 of {PAST_LONGEST_MAP_STEPS} without reset"):
             long_run(agent, 3, PAST_LONGEST_MAP_STEPS)
+    finally:
+        agent.close()
+
+
+def test_bad_input_check_catches_an_agent_that_stays_silent_until_reset(tmp_path):
+    """Every answer of this stand-in is a valid action, and it recovers at reset(): only the count of
+    pressed buttons after the bad input, with no reset() in between, gives it away."""
+    agent = start_agent(stand_in_repo(tmp_path, SILENT_AFTER_NAN))
+    try:
+        assert presses_after_bad_input(agent, 13) == 0
+        agent.reset()
+        assert presses(agent, np.random.default_rng(0), LIVENESS_STEPS, "after reset()") > 0
     finally:
         agent.close()
 

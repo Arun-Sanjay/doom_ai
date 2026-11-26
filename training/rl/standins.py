@@ -12,11 +12,15 @@ rollout workers can import it without loading torch.
 * ``ToyBandit`` and ``ToyRecall`` are tiny environments with the ``doom_env`` interface
   (``reset``, ``step``, ``privileged_state``). They return observations in the wrapper's format,
   so the whole pipeline (workers, encoder, buffer, loss) runs on them unchanged.
+* ``ToyFragile`` is a bandit that crashes or hangs once on request: the failure injection for the
+  tests of worker recovery.
 """
 
 from __future__ import annotations
 
 import math
+import os
+import threading
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -198,6 +202,7 @@ class BasicMeta:
     exit_centres: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), np.float64))
     known: bool = True          # False when the map format could not be read (totals are unknown)
     meta: object = None         # the full training.mapmeta.MapMeta when that module provided the facts
+    pads: object = None         # exit-pad centres, filled on first use by deps.exit_observation
 
 
 def basic_meta(wad: str, map_name: str = "MAP01") -> BasicMeta:
@@ -326,7 +331,39 @@ class ToyRecall(ToyBandit):
         return obs
 
 
+FRAGILE_ENV = "DOOMRL_FRAGILE"     # names the file that arms ToyFragile (worker processes inherit the variable)
+
+
+class ToyFragile(ToyBandit):
+    """A bandit that fails once on request, for the tests of worker recovery.
+
+    Before every step it looks for the file named by the environment variable ``DOOMRL_FRAGILE``.
+    If the file is there it is taken away (a rename, so exactly one environment in one process
+    fails, once) and the failure its text asks for happens: "exit" ends the whole process at once,
+    as a crash of the worker would; "hang" never returns from the step, as a call into a dead
+    engine does.
+    """
+
+    def step(self, action):
+        path = os.environ.get(FRAGILE_ENV)
+        if path and os.path.exists(path):
+            taken = f"{path}.{os.getpid()}"
+            try:
+                os.rename(path, taken)
+                with open(taken) as f:
+                    mode = f.read().strip()
+                os.remove(taken)
+            except OSError:
+                mode = ""
+            if mode == "exit":
+                os._exit(3)
+            if mode == "hang":
+                threading.Event().wait()
+        return super().step(action)
+
+
 TOY_ENVS = {"toy:bandit": lambda ticks: ToyBandit(ticks, contextual=True),
             "toy:fixed": lambda ticks: ToyBandit(ticks, contextual=False),
             "toy:episodic": lambda ticks: ToyBandit(ticks, contextual=True, p_terminate=0.05),
-            "toy:recall": lambda ticks: ToyRecall(ticks)}
+            "toy:recall": lambda ticks: ToyRecall(ticks),
+            "toy:fragile": lambda ticks: ToyFragile(ticks, contextual=True)}

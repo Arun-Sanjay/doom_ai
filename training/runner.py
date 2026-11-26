@@ -18,7 +18,9 @@ For each episode the runner calls: env.reset(seed) -> attach -> seed -> reset ->
 
 A policy that raises, or returns an invalid action, is treated as the official scorer treats it:
 the player stands still for the rest of the map, the episode is still scored, and the message is
-kept in the row's `agent_error`.
+kept in the row's `agent_error`. The agent is restarted for the next map: a policy given as a
+spec is built again after an episode in which it stopped, so no row depends on an earlier failure
+(a ready policy object cannot be rebuilt and only gets its `reset()`).
 
 `pose_estimate()` and `exit_believed()` are telemetry that the official scorer never calls, so
 they cannot cost the agent anything here either: a hook that raises or returns something
@@ -47,16 +49,16 @@ The limits are off by default because they describe the submitted agent: trainin
 The official scorer waits for the agent on a socket and gives up when a limit passes. Here the
 policy runs in the worker's own thread, so a call can only be judged once it returns. In worker
 processes the runner therefore also sets a timer that interrupts a call still running at its
-limit (`timed_call`); the worker then builds a fresh policy for its next map, as the official
-scorer restarts the agent. A call that cannot be interrupted (one stuck in native code) is ended
-by the pool's episode timeout, and with `workers=0` nothing can end it at all.
+limit (`timed_call`); the worker then builds a fresh policy for its next map, as after any other
+stop. A call that cannot be interrupted (one stuck in native code) is ended by the pool's episode
+timeout, and with `workers=0` nothing can end it at all.
 
 `policy_spec` is `"module:factory"`, or `("module:factory", {kwargs})`; the factory is called
-once per worker process (and again after a call was interrupted). With `workers=0` everything
-runs in the calling process and `policy_spec` may also be a ready policy object. Workers are
-fresh interpreters (the "spawn" start method), each limited to one compute thread like the
-evaluation sandbox; as with any multiprocessing code, a script that calls the runner needs the
-`if __name__ == "__main__":` guard.
+once per worker process (and again after an episode in which the policy stopped). With
+`workers=0` everything runs in the calling process and `policy_spec` may also be a ready policy
+object. Workers are fresh interpreters (the "spawn" start method), each limited to one compute
+thread like the evaluation sandbox; as with any multiprocessing code, a script that calls the
+runner needs the `if __name__ == "__main__":` guard.
 
 Rows
 ----
@@ -555,7 +557,9 @@ class _Player:
         is_spec = isinstance(record_spec, (str, dict, tuple, list))
         self.recorder = build(record_spec) if is_spec else record_spec
         self.render_buffers, self.time_scale = render_buffers, time_scale
-        self.cut_short = False   # the policy was interrupted in the middle of a call (see timed_call)
+        # The policy stopped in its last episode (it raised, returned an invalid action or ran out of
+        # time): the official scorer restarts the agent for the next map, so a fresh one is built.
+        self.stopped = False
         self._key, self._env, self._meta = None, None, None
 
     def _open(self, task: dict):
@@ -575,14 +579,17 @@ class _Player:
         message = ""
         for _attempt in range(2):   # an engine that died is replaced once
             try:
-                if self.cut_short:   # its state cannot be trusted any more: a fresh policy for the next map
-                    self.policy, self.cut_short = build(self.policy_spec), False   # (the official scorer restarts the agent)
+                if self.stopped and not hasattr(self.policy_spec, "act"):   # a ready object cannot be built again
+                    self.policy = build(self.policy_spec)
+                self.stopped = False
                 env, meta = self._open(task)
                 cuts = _calls_cut
                 try:
-                    return run_episode(self.policy, env, meta, task, self.recorder, self.policy_name, self.time_scale)
-                finally:
-                    self.cut_short = _calls_cut != cuts
+                    row = run_episode(self.policy, env, meta, task, self.recorder, self.policy_name, self.time_scale)
+                    self.stopped = bool(row["agent_error"])
+                    return row
+                finally:   # a call cut short and then an error of the engine: the policy is still not to be trusted
+                    self.stopped = self.stopped or _calls_cut != cuts
             except MapTooLarge as e:
                 return error_row(task, f"skipped: {e}", self.policy_name)
             except Exception:  # noqa: BLE001
