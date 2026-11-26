@@ -4,6 +4,15 @@ Our entry for **Yugaantar 2026 · DevForge — Track 1: "Can It Play DOOM?"**, b
 starter template. The agent plays unseen levels through the official `doom_env` wrapper: it has to
 survive fights, cross multi-room layouts, find keycards, open locked doors and reach the exit.
 
+**How the agent decides.** Every action comes from trained neural network weights. The policy is
+trained by reinforcement learning: our own recurrent PPO (`training/rl/`), with reward shaped like the
+evaluation categories, a curiosity reward and a curriculum. Combat is learned by PPO alone, from
+random weights. Navigation is kickstarted by a scripted teacher that exists only at training time
+(`training/teacher/`, never imported by the agent); its weight in the loss is stepped down as the
+policy's own held-out exit rate rises. There is no rule tree, no path search and no aiming maths in
+`submission/`; the only hand-written code that touches action choice is two action masks computed from
+observation fields (`submission/doomnet/spec.py`), and a lint test enforces this on every push.
+
 What is in this repository:
 
 - **The agent** (`submission/`): a three-level policy network (manager, value propagation,
