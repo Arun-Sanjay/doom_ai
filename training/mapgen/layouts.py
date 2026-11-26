@@ -27,6 +27,11 @@ over cell and keys held): every open cell must be reachable, the exit must be re
 really be needed, and the tick cap must be at least `MIN_BUDGET` times the shortest route at
 walking speed. Drafts that fail are discarded and the next attempt of the same seed is tried, so
 `generate` is a pure function of (tier, seed).
+
+`generate(tier, seed, profile="wide")` holds the drafts of tiers 1 to 4 to wider limits (`WIDE`):
+larger arenas, more monsters, and in tiers 2 to 4 a long route under a tick cap of only
+`WIDE["budget"]` times its cost, with every key placed far from its door. The default profile,
+"base", is the generator described above and gives the same maps as before the option existed.
 """
 
 from __future__ import annotations
@@ -60,6 +65,8 @@ MONSTER_MIX = {
     4: (("z", 18), ("s", 15), ("i", 20), ("c", 12), ("d", 10), ("g", 6), ("l", 6), ("o", 7), ("k", 6)),
 }
 MONSTER_HP_PER_CELL = {1: 8, 2: 3, 3: 4, 4: 8}   # cap on total monster health per open cell
+# Most monsters on a map of tiers 2 to 4: (cap, allowance of a small map, open cells per further monster).
+MONSTER_COUNT = {2: (6, 2, 60), 3: (8, 3, 50), 4: (16, 6, 30)}
 MIN_MONSTERS = {0: 0, 1: 2, 2: 0, 3: 1, 4: 4}
 MONSTER_FREE = {2: 0.35}                         # share of the maps of a tier that get no monster at all
 # Build options that only concern monsters; a monster-free copy of a map drops them.
@@ -97,6 +104,31 @@ TIERS = {
             styles=(("house", 6), ("scatter", 6), ("maze", 4)),
             min_open=110, min_route=30, ticks=((2800, 1), (3150, 1), (3500, 2), (3850, 2), (4200, 4))),
 }
+
+# The limits of the "wide" profile, an explicit option of `generate`; "base" is every constant above.
+#   size         side range of the plan per tier; `max_side` also bounds the finished grid
+#   budget       tiers 2 to 4: the tick cap is between these multiples of the cost of the shortest
+#                route, so the route is 700 to 2800 tics long and little time is left beside it
+#   monsters     as MONSTER_COUNT, raised to 12, 12 and 20; the number on a map is the largest of
+#                `monster_draws` draws, so crowded maps are common
+#   hp_per_cell  as MONSTER_HP_PER_CELL, raised in the same proportion as the monster caps
+#   exit_far     the exit is at least this share of the longest walk away from the start (tiers 2 to 4)
+#   key_pool     a key goes on one of this share of the possible cells that lie farthest from its door
+#   lock_span    locked doors stand in this first share of the route, so the exit is far past the last one
+#   attempts     drafts tried for a seed before `generate` gives up
+PROFILES = ("base", "wide")
+WIDE = dict(
+    size={1: (12, 26), 2: (16, 26), 3: (16, 26), 4: (18, 28)},
+    max_side={1: 26, 2: 26, 3: 26, 4: 28},
+    budget=(1.5, 3.0),
+    monsters={2: (12, 4, 30), 3: (12, 4, 35), 4: (20, 7, 24)},
+    monster_draws=2,
+    hp_per_cell={1: 8, 2: 6, 3: 6, 4: 10},
+    exit_far=(0.7, 0.9, 0.9),
+    key_pool=0.125,
+    lock_span=0.8,
+    attempts=4000,
+)
 
 
 class Reject(Exception):
@@ -737,17 +769,21 @@ def place_exit(g: Grid, rng: random.Random, start, style: str, far: float) -> tu
     raise Reject("no place for the exit")
 
 
-def place_locks(g: Grid, rng: random.Random, start, exit_cell, count: int) -> list[dict]:
+def place_locks(g: Grid, rng: random.Random, start, exit_cell, count: int, far: dict | None = None) -> list[dict]:
     """Turn up to `count` chokepoints of the route into locked doors and hide a key for each.
 
     A chokepoint is a 1-wide passage cell that every route from the start to the exit crosses. The
     key of a lock is placed in the part of the map that can be reached without opening that lock,
     preferably past the previous lock (so locks must be opened in order), in a dead end, and
     farther from the entrance of that part than the locked door is (so the door is met first).
+
+    With `far` (the limits of the wide profile) the locked doors stand in the first `lock_span` of
+    the route and a key goes on one of the cells farthest from its door, among those past the door
+    when there are any: the door is met, the key is a long walk away, and the way back is as long.
     """
     route = g.path(start, exit_cell)
     size = {}                                           # chokepoint -> cells reachable while it is shut
-    for cell in route[2:-2]:
+    for cell in (route[2:max(3, int(far["lock_span"] * len(route)))] if far else route[2:-2]):
         if g.doorway(*cell):
             zone = g.dist(start, blocked={cell})
             if exit_cell not in zone and len(zone) >= MIN_LOCK_ZONE:
@@ -771,9 +807,16 @@ def place_locks(g: Grid, rng: random.Random, start, exit_cell, count: int) -> li
             raise Reject("no place for a key")
         door_at = min(from_entry[n] for n in g.around(*cell) if n in from_entry) + 1
         beyond = [c for c in spots if from_entry[c] > door_at]
-        pool = beyond if beyond and rng.random() < 0.85 else spots
-        pool.sort(key=lambda c: (len(g.exits_of(*c)) != 1, -from_entry[c], c))
-        key_cell = rng.choice(pool[: max(1, len(pool) // 4)])
+        if far:
+            front = min((n for n in g.around(*cell) if n in from_entry), key=lambda n: (from_entry[n], n))
+            from_door = g.dist(front, blocked={cell})
+            pool = beyond or spots
+            pool.sort(key=lambda c: (-from_door[c], c))
+            key_cell = rng.choice(pool[: max(1, int(far["key_pool"] * len(pool)))])
+        else:
+            pool = beyond if beyond and rng.random() < 0.85 else spots
+            pool.sort(key=lambda c: (len(g.exits_of(*c)) != 1, -from_entry[c], c))
+            key_cell = rng.choice(pool[: max(1, len(pool) // 4)])
         g.put(*key_cell, (SKULL_FOR if rng.random() < 0.25 else CARD_FOR)[colour])
         g.put(*cell, DOOR_FOR[colour])
         locks.append({"door": cell, "key": key_cell, "colour": colour, "door_first": from_entry[key_cell] > door_at})
@@ -794,23 +837,27 @@ def place_doors(g: Grid, rng: random.Random, density: float) -> int:
     return made
 
 
-def place_monsters(g: Grid, rng: random.Random, tier: int, start) -> list[tuple[int, int]]:
+def place_monsters(g: Grid, rng: random.Random, tier: int, start, most=MONSTER_COUNT,
+                   hp_per_cell=MONSTER_HP_PER_CELL, draws: int = 1) -> list[tuple[int, int]]:
     """Scatter monsters away from the start. In tiers 3 and 4 some guard a key or the exit, and in
     tier 4 some wait beside doors. A share `MONSTER_FREE` of the tier 2 maps gets none. Returns the
-    cells whose monster gets the ambush flag."""
+    cells whose monster gets the ambush flag. `most` and `hp_per_cell` are the caps on the number of
+    monsters and on their total health per open cell (those of the base profile unless given); in
+    tiers 2 to 4 the number of monsters is the largest of `draws` draws up to the cap."""
     area = len(g.open_cells())
     if tier == 1:
         count = rng.randint(2, max(3, min(12, area // 9)))
-    elif tier == 2:
-        count = 0 if rng.random() < MONSTER_FREE[2] else rng.randint(1, min(6, 2 + area // 60))
-    elif tier == 3:
-        count = rng.randint(1, min(8, 3 + area // 50))
     else:
-        count = rng.randint(4, min(16, 6 + area // 30))
+        cap, small, per = most[tier]
+        lowest = MIN_MONSTERS[tier] if tier == 4 else 1
+        if tier == 2 and rng.random() < MONSTER_FREE[2]:
+            count = 0
+        else:
+            count = max(rng.randint(lowest, min(cap, small + area // per)) for _ in range(draws))
     dist = g.dist(start)
     near = 4 if area > 40 else 3
     ambush: list[tuple[int, int]] = []
-    budget = [MONSTER_HP_PER_CELL[tier] * area]          # total monster health the map may hold
+    budget = [hp_per_cell[tier] * area]                  # total monster health the map may hold
 
     def put(cell, flag_chance: float) -> None:
         kinds = [(m, wgt) for m, wgt in MONSTER_MIX[tier]
@@ -943,10 +990,20 @@ def without_monsters(m: dict) -> dict:
     return {**m, "grid": grid, "options": options, "counts": {**m["counts"], **describe(grid, options)}}
 
 
-def tick_cap(rng: random.Random, tier: int, sol: Solution) -> int:
+def tick_cap(rng: random.Random, tier: int, sol: Solution, budget: tuple[float, float] | None = None) -> int:
     """Tick cap between 2100 and 4200 in steps of 350: a tier-typical value, raised until it is a
     random factor between MIN_BUDGET and MAX_BUDGET times the shortest route at walking speed.
-    Raises Reject when 4200 tics are less than MIN_BUDGET times the route."""
+    Raises Reject when 4200 tics are less than MIN_BUDGET times the route.
+
+    With `budget` = (least, most) and an exit, the cap is instead one of the steps that lie between
+    `least` and `most` times the route, each equally likely; Reject when there is none (the route
+    is too short for 2100 tics or too long for 4200)."""
+    if budget and sol.has_exit:
+        route = FRAME_SKIP * sol.optimal_steps
+        caps = [cap for cap in range(MIN_TICKS, MAX_TICKS + 1, TICK_STEP) if budget[0] * route <= cap <= budget[1] * route]
+        if not caps:
+            raise Reject("no tick cap within the budget of the route")
+        return rng.choice(caps)
     cap = pick(rng, TIERS[tier]["ticks"])
     if sol.has_exit:
         route = FRAME_SKIP * sol.optimal_steps
@@ -957,11 +1014,14 @@ def tick_cap(rng: random.Random, tier: int, sol: Solution) -> int:
     return min(cap, MAX_TICKS)
 
 
-def draft(tier: int, rng: random.Random, lock_counts=None) -> dict:
+def draft(tier: int, rng: random.Random, lock_counts=None, profile: str = "base") -> dict:
     """One attempt at a map of the given tier. Raises Reject if the attempt does not work out.
-    `lock_counts` replaces the tier's own ((number of locks, weight), ...) when given."""
+    `lock_counts` replaces the tier's own ((number of locks, weight), ...) when given, and
+    `profile` "wide" holds the draft to the limits of `WIDE` instead of the base ones."""
     spec = TIERS[tier]
-    lo, hi = spec["size"]
+    wide = WIDE if profile == "wide" else None
+    tight = wide is not None and tier >= 2               # long route, tick cap within the wide budget
+    lo, hi = wide["size"][tier] if wide else spec["size"]
     w = rng.randint(lo, hi)
     h = rng.randint(max(lo, w // 2), w) if rng.random() < 0.6 else rng.randint(lo, hi)
     style = pick(rng, spec["styles"])
@@ -978,10 +1038,10 @@ def draft(tier: int, rng: random.Random, lock_counts=None) -> dict:
     exit_style = None
     if has_exit:
         exit_cell, exit_style = place_exit(g, rng, start, rng.choice(EXIT_STYLES),
-                                           far=rng.choice((0.3, 0.5, 0.5, 0.7, 0.9)))
+                                           far=rng.choice(wide["exit_far"] if tight else (0.3, 0.5, 0.5, 0.7, 0.9)))
         want = pick(rng, lock_counts or spec["locks"])
         if want:
-            locks = place_locks(g, rng, start, exit_cell, want)
+            locks = place_locks(g, rng, start, exit_cell, want, far=wide if tight else None)
             if len(locks) < min(want, 2 if tier == 4 else 1):
                 raise Reject("not enough chokepoints for the locks")
     else:
@@ -991,7 +1051,13 @@ def draft(tier: int, rng: random.Random, lock_counts=None) -> dict:
         place_doors(g, rng, density=rng.choice(spec["doors"]))
     g = g.trimmed()                                      # cell coordinates are final from here on
     start = g.cells(START)[0]
-    ambush = place_monsters(g, rng, tier, start) if tier > 0 else []
+    if wide:
+        if max(g.w, g.h) > wide["max_side"][tier]:
+            raise Reject("larger than the size range")
+        ambush = place_monsters(g, rng, tier, start, most=wide["monsters"], hp_per_cell=wide["hp_per_cell"],
+                                draws=wide["monster_draws"])
+    else:
+        ambush = place_monsters(g, rng, tier, start) if tier > 0 else []
     place_pickups(g, rng, tier)
 
     grid = g.text()
@@ -1012,7 +1078,8 @@ def draft(tier: int, rng: random.Random, lock_counts=None) -> dict:
                   optimal_steps=sol.optimal_steps,
                   doors_met_before_key=sum(lock["door_first"] for lock in locks))
     return {"grid": grid, "tier": tier, "style": style, "exit_style": exit_style,
-            "episode_ticks": tick_cap(rng, tier, sol), "options": options, "counts": counts}
+            "episode_ticks": tick_cap(rng, tier, sol, wide["budget"]) if tight else tick_cap(rng, tier, sol),
+            "options": options, "counts": counts}
 
 
 def has_key_stage(tier: int, seed: int) -> bool:
@@ -1021,19 +1088,33 @@ def has_key_stage(tier: int, seed: int) -> bool:
     return tier == 0 and seed % KEY_STAGE_EVERY == KEY_STAGE_EVERY - 1
 
 
-def generate(tier: int, seed: int) -> dict:
+def generate(tier: int, seed: int, profile: str = "base") -> dict:
     """The map of (tier, seed) in the reference dialect: grid, tick cap, build options and counts.
-    Deterministic: the same arguments always give the same map."""
+    Deterministic: the same arguments always give the same map.
+
+    `profile` "wide" gives a different map for the same (tier, seed), drawn from a random stream of
+    its own under the limits of `WIDE` (tiers 1 to 4 only); the result then carries
+    `"profile": "wide"`. The default, "base", is unchanged by the existence of the option."""
     if tier not in TIERS:
         raise ValueError(f"unknown tier {tier}")
+    if profile not in PROFILES:
+        raise ValueError(f"unknown profile {profile!r}")
+    if profile == "base":
+        stream, attempts = "mapgen-v1", MAX_ATTEMPTS
+    elif tier not in WIDE["size"]:
+        raise ValueError(f"the wide profile has no tier {tier}")
+    else:
+        stream, attempts = "mapgen-wide-v1", WIDE["attempts"]
     lock_counts = KEY_STAGE_LOCKS if has_key_stage(tier, seed) else None
-    for attempt in range(MAX_ATTEMPTS):
-        rng = random.Random(f"mapgen-v1/{tier}/{seed}/{attempt}")
+    for attempt in range(attempts):
+        rng = random.Random(f"{stream}/{tier}/{seed}/{attempt}")
         try:
-            out = draft(tier, rng, lock_counts)
+            out = draft(tier, rng, lock_counts, profile)
         except Reject:
             continue
         out["seed"] = seed
         out["attempts"] = attempt + 1
+        if profile != "base":
+            out["profile"] = profile
         return out
-    raise RuntimeError(f"no valid map for tier {tier}, seed {seed} in {MAX_ATTEMPTS} attempts")
+    raise RuntimeError(f"no valid map for tier {tier}, seed {seed} in {attempts} attempts")

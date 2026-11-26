@@ -1,4 +1,4 @@
-"""Tests for the map generator: grid compiler, solver, layouts, command line and frozen suites."""
+"""Tests for the map generator: grid compiler, solver, layouts (base and wide profile), command line and frozen suites."""
 
 import hashlib
 import json
@@ -273,6 +273,62 @@ def test_random_options_are_valid_and_reproducible(tmp_path):
         assert "exit_floor" not in opts
         udmf.build_textmap(m["grid"], **opts)
     assert seen == {"start_angle", "start_offset", "thing_angles", "ambush", "light", "themes", "ceiling", "exit_wall", "door_delay"}
+    seen = set()
+    for seed in range(40):                                        # the looks alone: the start pose is left to random_start
+        seen |= set(randomize.random_options(random.Random(seed), m["grid"], m["options"], start=False))
+    assert seen == {"thing_angles", "ambush", "light", "themes", "ceiling", "exit_wall", "door_delay"}
+
+
+def test_first_training_set_keeps_its_options():
+    """Without a start control `make_map` draws what it drew for data/maps/train (digest taken
+    before the start control was added)."""
+    options = [cli.make_map(tier, seed, 0.5)["options"] for tier in range(5) for seed in range(12)]
+    assert hashlib.sha1(json.dumps(options, sort_keys=True).encode()).hexdigest() == "0d481bb1d951193a2e0b052bacdbc09d2e312735"
+
+
+def test_start_pose_has_its_own_probabilities():
+    on_grid = randomize.start_on_grid
+    assert on_grid(None) and on_grid({}) and on_grid({"start_angle": 270}) and on_grid({"start_offset": [0, 0]})
+    assert not on_grid({"start_angle": 45}) and not on_grid({"start_offset": [0, 3]}) and not on_grid({"start_angle": 90, "start_offset": (-1, 0)})
+    rng, n = random.Random(7), 4000
+    draws = [randomize.random_start(rng) for _ in range(n)]
+    quarter = sum(d.get("start_angle") in (90, 180, 270) for d in draws)
+    turned = sum(d.get("start_angle", 0) % 90 != 0 for d in draws)
+    shifted = sum("start_offset" in d for d in draws)
+    assert randomize.START_DEFAULTS == (0.5, 0.05, 0.05)
+    assert abs(quarter / n - 0.5) < 0.03 and abs(turned / n - 0.05) < 0.015 and abs(shifted / n - 0.05) < 0.015
+    assert 0.06 < sum(not on_grid(d) for d in draws) / n < 0.14                 # the robustness slice stays small
+    for d in draws:
+        assert set(d) <= {"start_angle", "start_offset"} and json.loads(json.dumps(d)) == d
+        assert on_grid(d) == (d.get("start_angle", 0) % 90 == 0 and "start_offset" not in d)
+        assert "start_offset" not in d or (any(d["start_offset"]) and all(abs(v) <= 16 for v in d["start_offset"]))
+    assert all(randomize.random_start(rng, 0, 0, 0) == {} for _ in range(50))
+    assert all(randomize.random_start(rng, 1, 0, 0)["start_angle"] in (90, 180, 270) for _ in range(50))
+    assert not any(on_grid(randomize.random_start(rng, 0, 1, 0)) or on_grid(randomize.random_start(rng, 0, 0, 1)) for _ in range(200))
+    for bad in ((0.7, 0.4, 0.0), (-0.1, 0.0, 0.0), (0.0, 0.0, 1.5)):
+        with pytest.raises(ValueError):
+            randomize.random_start(rng, *bad)
+
+
+def test_start_control_leaves_the_map_and_sets_the_start_on_every_map():
+    start = randomize.START_DEFAULTS
+    off = 0
+    for tier in (0, 3):
+        for seed in range(150):
+            plain, m = cli.make_map(tier, seed), cli.make_map(tier, seed, start=start)
+            assert m == cli.make_map(tier, seed, start=start)
+            assert (m["grid"], m["episode_ticks"], m["counts"], m["randomized"]) == (plain["grid"], plain["episode_ticks"], plain["counts"], False)
+            assert set(m["options"]) <= {"ambush", "start_angle", "start_offset"}          # reference looks, own start
+            assert {k: v for k, v in m["options"].items() if not k.startswith("start_")} == plain["options"]
+            looks = cli.make_map(tier, seed, 1.0, start=start)                            # same start under random looks
+            assert {k: looks["options"].get(k) for k in ("start_angle", "start_offset")} == \
+                {k: m["options"].get(k) for k in ("start_angle", "start_offset")}
+            assert looks["grid"] == m["grid"] and looks["randomized"]
+            assert cli.make_map(tier, seed, 1.0, strip=True, start=start) == layouts.without_monsters(looks)
+            off += not randomize.start_on_grid(m["options"])
+    assert 12 <= off <= 50                                                                # about 10% of 300
+    legacy = [cli.make_map(2, seed, 1.0) for seed in range(100)]
+    assert sum(not randomize.start_on_grid(m["options"]) for m in legacy) > 60            # the first set: mostly off the grid
 
 
 # ---- solver -----------------------------------------------------------------------------------------
@@ -318,9 +374,10 @@ def test_generation_does_not_depend_on_the_hash_seed():
     assert len(digests) == 1
 
 
-def check_map(m: dict, bare: bool = False) -> None:
+def check_map(m: dict, bare: bool = False, profile: str = "base") -> None:
     """Everything a generated map promises, checked without the engine. `bare` is set for a
-    monster-free copy: a map written with --strip-monsters or a row of a navigation suite."""
+    monster-free copy: a map written with --strip-monsters or a row of a navigation suite.
+    `profile` is the layout profile the map was generated with (it decides the tick cap rule)."""
     tier, counts, grid = m["tier"], m["counts"], m["grid"]
     sol = solve(grid)
     assert sol.solvable and sol.all_reachable
@@ -330,7 +387,12 @@ def check_map(m: dict, bare: bool = False) -> None:
     assert m["episode_ticks"] in range(2100, 4201, 350)
     if counts["exits"]:
         assert sol.exit_reachable and counts["optimal_steps"] == sol.optimal_steps
-        assert m["episode_ticks"] >= layouts.MIN_BUDGET * 4 * sol.optimal_steps
+        if profile == "wide" and tier >= 2:                    # a long route and little time beside it
+            least, most = layouts.WIDE["budget"]
+            assert (least, most) == (1.5, 3.0)
+            assert least * 4 * sol.optimal_steps <= m["episode_ticks"] <= most * 4 * sol.optimal_steps
+        else:
+            assert m["episode_ticks"] >= layouts.MIN_BUDGET * 4 * sol.optimal_steps
     assert counts["keys"] == counts["locks"]
     assert counts["monsters"] == sum(grid.count(ch) for ch in udmf.MONSTER_CHARS)
     if tier == 0:                                               # navigation: never a monster, at most one lock
@@ -412,6 +474,102 @@ def test_tiers_1_to_4_still_generate_the_frozen_maps():
         assert all(layouts.generate(tier, seed)["counts"]["monsters"] >= layouts.MIN_MONSTERS[tier] >= 1 for seed in range(30))
 
 
+# ---- the wide profile ---------------------------------------------------------------------------------
+def test_base_profile_is_what_it_was_before_the_wide_option():
+    """`generate` without a profile gives the maps it gave before the option existed (digest taken
+    from the code as it was), and naming the base profile changes nothing."""
+    maps = [layouts.generate(tier, seed) for tier in range(5) for seed in range(16)]
+    assert hashlib.sha1(json.dumps(maps, sort_keys=True).encode()).hexdigest() == "766dd2a082e428438edd656faeb43f18f51b25cd"
+    assert not any("profile" in m for m in maps)
+    for tier, seed in ((0, 2), (1, 3), (2, 5), (3, 7), (4, 11)):
+        assert layouts.generate(tier, seed, "base") == layouts.generate(tier, seed)
+        assert cli.make_map(tier, seed, 0.5, profile="base") == cli.make_map(tier, seed, 0.5)
+    assert layouts.PROFILES == ("base", "wide")
+    for tier, profile in ((0, "wide"), (5, "wide"), (2, "huge")):
+        with pytest.raises(ValueError):
+            layouts.generate(tier, 0, profile)
+
+
+def _monster_health(grid: str, kinds: str) -> int:
+    return sum(layouts.MONSTER_HP[ch] for ch in grid if ch in kinds)
+
+
+def _key_walks(m: dict) -> tuple[list[int], int]:
+    """Along the solver's route: cells from every key to its door, and from the last key to the exit."""
+    route = solve(m["grid"]).path
+    rows = m["grid"].split("\n")
+    seen = [rows[r][c] for c, r in route]
+    to_door, last = [], 0
+    for door, keys in (("R", "r1"), ("B", "b2"), ("Y", "y3")):
+        if door in seen:
+            at = max(i for i, ch in enumerate(seen[:seen.index(door)]) if ch in keys)
+            to_door.append(seen.index(door) - at)
+            last = max(last, at)
+    return to_door, len(seen) - 1 - last
+
+
+def test_wide_profile_keeps_the_rules_inside_wider_limits():
+    """Tiers 1 to 4 of the wide profile: solvable, every lock needed, sizes and monster numbers inside
+    the wider limits, monster health per open cell inside the relaxed cap, and in tiers 2 to 4 a tick
+    cap of 1.5 to 3 times the cost of the route. The population really uses the room it was given."""
+    wide = layouts.WIDE
+    assert {t: wide["monsters"][t][0] for t in (2, 3, 4)} == {2: 12, 3: 12, 4: 20}
+    assert {t: wide["hp_per_cell"][t] / layouts.MONSTER_HP_PER_CELL[t] for t in (2, 3, 4)} == \
+        {t: wide["monsters"][t][0] / layouts.MONSTER_COUNT[t][0] for t in (2, 3, 4)}       # relaxed in proportion
+    assert wide["hp_per_cell"][1] == layouts.MONSTER_HP_PER_CELL[1] and wide["size"][1][1] == wide["max_side"][1] == 26
+    maps = {tier: [layouts.generate(tier, seed, "wide") for seed in range(60)] for tier in (1, 2, 3, 4)}
+    for tier, part in maps.items():
+        assert part[5] == layouts.generate(tier, 5, "wide") and part[5]["grid"] != layouts.generate(tier, 5)["grid"]
+        assert len({m["grid"] for m in part}) == 60
+        for m in part:
+            check_map(m, profile="wide")
+            counts = m["counts"]
+            assert m["profile"] == "wide" and max(counts["width"], counts["height"]) <= wide["max_side"][tier]
+            assert counts["monsters"] <= (12 if tier == 1 else wide["monsters"][tier][0])
+            # every monster but the zombieman is paid for out of the health the map may hold
+            assert _monster_health(m["grid"], "scidglok") <= wide["hp_per_cell"][tier] * counts["open_cells"]
+            assert set(m["options"]) <= {"ambush"}
+    assert max(max(m["counts"]["width"], m["counts"]["height"]) for m in maps[1]) > 22           # larger arenas
+    assert max(m["counts"]["monsters"] for m in maps[2]) > 6 and max(m["counts"]["monsters"] for m in maps[3]) > 8
+    assert max(m["counts"]["monsters"] for m in maps[4]) > 16
+    assert 15 <= sum(m["counts"]["exits"] for m in maps[1]) <= 45                                 # arenas: about half
+    assert sum(m["counts"]["monsters"] == 0 for m in maps[2]) >= 10                              # still a monster-free share
+    for tier in (2, 3, 4):
+        base = [layouts.generate(tier, seed) for seed in range(60)]
+        budgets = [m["episode_ticks"] / (4 * m["counts"]["optimal_steps"]) for m in maps[tier]]
+        assert min(budgets) < 1.8 and max(budgets) > 2.7 and all(m["counts"]["optimal_steps"] >= 175 for m in maps[tier])
+        mean = lambda part, key: sum(m["counts"][key] for m in part) / len(part)             # noqa: E731
+        assert mean(maps[tier], "route_cells") > 1.3 * mean(base, "route_cells")
+        assert mean(maps[tier], "monsters") > 1.3 * mean(base, "monsters")
+        if tier >= 3:                                              # long backtracking: key far from its door, exit far from the last key
+            far, near = [_key_walks(m) for m in maps[tier]], [_key_walks(m) for m in base]
+            to_door = lambda walks: sum(sum(w[0]) for w in walks) / sum(len(w[0]) for w in walks)   # noqa: E731
+            to_exit = lambda walks: sum(w[1] for w in walks) / len(walks)                             # noqa: E731
+            assert to_door(far) > 1.3 * to_door(near) and to_exit(far) > 1.3 * to_exit(near)
+            locks = sum(m["counts"]["locks"] for m in maps[tier])
+            assert sum(m["counts"]["doors_met_before_key"] for m in maps[tier]) >= 0.6 * locks
+
+
+def test_wide_maps_get_looks_and_start_of_their_own():
+    start = randomize.START_DEFAULTS
+    for tier in (1, 3):
+        for seed in range(20):
+            plain = cli.make_map(tier, seed, profile="wide")
+            m = cli.make_map(tier, seed, 1.0, start=start, profile="wide")
+            assert m == cli.make_map(tier, seed, 1.0, start=start, profile="wide") and m["randomized"] and m["profile"] == "wide"
+            assert (m["grid"], m["episode_ticks"]) == (plain["grid"], plain["episode_ticks"]) and plain["name"] == f"t{tier}_{seed:07d}"
+            assert cli.make_map(tier, seed, 1.0, strip=True, start=start, profile="wide") == layouts.without_monsters(m)
+            check_map(m, profile="wide")
+
+
+@pytest.mark.parametrize("tier", [1, 2, 3, 4])
+def test_wide_maps_play_in_the_engine(tmp_path, tier):
+    """Wide maps load, step without warnings, and the reference walker reaches the exit inside the
+    (tight) tick cap."""
+    for seed in (0, 1):
+        _engine_check(tmp_path, cli.make_map(tier, seed, randomize=float(seed), profile="wide"), steps=40, within=0.85)
+
+
 def test_without_monsters_keeps_everything_but_the_monsters():
     """A monster-free copy has the same walls, doors, keys, pickups, start, looks, route and tick cap."""
     monster_types = {udmf.LEGEND[ch].thing for ch in udmf.MONSTER_CHARS}
@@ -489,10 +647,10 @@ def _play(path: str, ticks: int, steps: int, seed: int) -> None:
         env.close()
 
 
-def _engine_check(tmp_path, m: dict, steps: int) -> None:
+def _engine_check(tmp_path, m: dict, steps: int, within: float = 0.6) -> None:
     """The map loads with the sectors and doors the grid describes, the player stands on its start
     cell, random play raises no warning, and (monsters removed) the reference walker reaches the exit
-    well inside the tick cap."""
+    well inside the tick cap: in at most the share `within` of it."""
     rows = m["grid"].split("\n")
     path = build(tmp_path, m["grid"], f"{m['tier']}_{m['seed']}.wad", **m["options"])
     env = make_env(path, episode_ticks=m["episode_ticks"], render_buffers=False)
@@ -515,7 +673,7 @@ def _engine_check(tmp_path, m: dict, steps: int) -> None:
         env.close()
         assert result["exit_reached"], (m["tier"], m["seed"])
         assert sum(result["keys"]) == m["counts"]["keys"]            # every key on the route was picked up
-        assert 4 * result["steps"] <= 0.6 * m["episode_ticks"]
+        assert 4 * result["steps"] <= within * m["episode_ticks"]
 
 
 @pytest.mark.parametrize("tier", sorted(layouts.TIERS))
@@ -544,7 +702,8 @@ def test_cli_writes_wads_and_manifest(tmp_path, capsys):
     assert 5 <= sum(row["randomized"] for row in rows) <= 25
     for row, other in zip(rows, cli.read_rows(tmp_path / "b" / "manifest.jsonl")):
         assert set(row) == {"name", "path", "file", "tier", "seed", "episode_ticks", "style", "exit_style",
-                            "randomized", "grid", "options", "counts"}
+                            "randomized", "on_grid", "grid", "options", "counts"}
+        assert row["on_grid"] is randomize.start_on_grid(row["options"])
         wad = Path(row["path"])
         assert wad.name == row["file"] and wad.read_bytes() == udmf.build_wad(row["grid"], **row["options"])
         assert wad.read_bytes() == (tmp_path / "b" / other["file"]).read_bytes()     # reproducible
@@ -559,6 +718,83 @@ def test_cli_writes_wads_and_manifest(tmp_path, capsys):
     broken = dict(rows[0], grid=rows[0]["grid"].replace("E", "."), counts=dict(rows[0]["counts"], sectors=99))
     with pytest.raises(RuntimeError):
         cli.verify_map(broken)
+
+
+def test_cli_start_flags_keep_most_starts_on_the_grid(tmp_path, capsys):
+    base = ["--n", "40", "--tiers", "0,2", "--seed", "700", "--randomize", "0.5"]
+    cli.main(["--out", str(tmp_path / "v2"), *base, "--start-quarter", "0.5", "--start-any", "0.05", "--start-offset", "0.05"])
+    assert "start on the grid" in capsys.readouterr().out
+    rows = cli.read_rows(tmp_path / "v2" / "manifest.jsonl")
+    assert len(rows) == 80 and 60 <= sum(row["on_grid"] for row in rows) < 80
+    assert 20 <= sum(row["options"].get("start_angle") in (90, 180, 270) for row in rows) <= 60
+    assert 20 <= sum(row["randomized"] for row in rows) <= 60
+    for row in rows:
+        assert row["on_grid"] is randomize.start_on_grid(row["options"])
+        assert row["randomized"] or set(row["options"]) <= {"ambush", "start_angle", "start_offset"}
+        assert Path(row["path"]).read_bytes() == udmf.build_wad(row["grid"], **row["options"])
+        check_map(row)
+    assert cli.verify([row for row in rows if not row["on_grid"]][:3] + rows[:2])
+    cli.main(["--out", str(tmp_path / "default"), *base, "--start-any", "0.05"])       # the flags left out take the defaults
+    assert cli.read_rows(tmp_path / "default" / "manifest.jsonl") == [
+        dict(row, path=row["path"].replace("/v2/", "/default/")) for row in rows]
+    cli.main(["--out", str(tmp_path / "on"), *base, "--start-quarter", "1", "--start-any", "0", "--start-offset", "0"])
+    on = cli.read_rows(tmp_path / "on" / "manifest.jsonl")
+    assert all(row["on_grid"] and row["options"]["start_angle"] in (90, 180, 270) for row in on)
+    assert [row["grid"] for row in on] == [row["grid"] for row in rows]                # the start flags never change a layout
+    cli.main(["--out", str(tmp_path / "off"), *base, "--start-quarter", "0", "--start-any", "0", "--start-offset", "1"])
+    assert not any(row["on_grid"] for row in cli.read_rows(tmp_path / "off" / "manifest.jsonl"))
+    cli.main(["--out", str(tmp_path / "old"), *base])                                  # no flag: the first set's start draw
+    old = cli.read_rows(tmp_path / "old" / "manifest.jsonl")
+    assert all(row["on_grid"] for row in old if not row["randomized"]) and sum(not row["on_grid"] for row in old) > 16
+    for bad in (["--start-quarter", "0.8", "--start-any", "0.5"], ["--start-offset", "2"],
+                ["--start-any", "0.1", "--from-suite", str(SUITES / "dev_v1.jsonl")]):
+        with pytest.raises(SystemExit):
+            cli.main(["--out", str(tmp_path / "bad"), *base, *bad])
+    assert not (tmp_path / "bad").exists()
+
+
+def test_cli_wide_profile_extends_a_set(tmp_path, capsys):
+    """--extend copies a set as it is, --profile wide adds wide maps (one --n per tier), and every
+    row names its profile; a set written without these flags has no such field."""
+    cli.main(["--out", str(tmp_path / "v2"), "--n", "4", "--tiers", "0,2,3", "--seed", "500", "--randomize", "0.5", "--start-quarter", "0.5"])
+    old = cli.read_rows(tmp_path / "v2" / "manifest.jsonl")
+    assert not any("profile" in row for row in old)
+    capsys.readouterr()
+    wide_args = ["--profile", "wide", "--n", "2,3,2,3", "--tiers", "1,2,3,4", "--seed", "900", "--randomize", "0.5", "--start-quarter", "0.5"]
+    cli.main(["--out", str(tmp_path / "v3"), "--extend", str(tmp_path / "v2" / "manifest.jsonl"), *wide_args])
+    out = capsys.readouterr().out
+    assert "after 12 copied" in out and "profile base" in out and "profile wide" in out and "tick cap over route cost" in out
+    rows = cli.read_rows(tmp_path / "v3" / "manifest.jsonl")
+    assert [row["profile"] for row in rows] == ["base"] * 12 + ["wide"] * 10
+    assert [row["tier"] for row in rows[12:]] == [1, 1, 2, 2, 2, 3, 3, 4, 4, 4]
+    assert all(tuple(row) == cli.ROW_KEYS for row in rows) and len({row["name"] for row in rows}) == 22
+    for row, source in zip(rows, old):                             # copied: the same row and the same bytes in a new place
+        assert {k: v for k, v in row.items() if k not in ("path", "profile")} == {k: v for k, v in source.items() if k != "path"}
+        assert Path(row["path"]).parent == tmp_path / "v3" and Path(row["path"]).read_bytes() == Path(source["path"]).read_bytes()
+    for row in rows[12:]:
+        assert Path(row["path"]).read_bytes() == udmf.build_wad(row["grid"], **row["options"])
+        assert row["on_grid"] is randomize.start_on_grid(row["options"]) and 900 <= row["seed"] < 910
+        assert row["grid"] == layouts.generate(row["tier"], row["seed"], "wide")["grid"]
+        check_map(row, profile="wide")
+    assert cli.read_rows(tmp_path / "v2" / "manifest.jsonl") == old                   # the extended set is left alone
+    cli.main(["--stats", str(tmp_path / "v3" / "manifest.jsonl"), "--profile", "wide"])
+    out = capsys.readouterr().out
+    assert "tier 4: 3 maps" in out and "tier 0" not in out and "profile" not in out
+    assert cli.verify([row for row in rows[12:] if row["tier"] >= 2][::3])           # the walker finishes inside the tight cap
+    cli.main(["--out", str(tmp_path / "w"), *wide_args])                                # a wide set on its own
+    alone = cli.read_rows(tmp_path / "w" / "manifest.jsonl")
+    assert [{k: v for k, v in row.items() if k != "path"} for row in alone] == [{k: v for k, v in row.items() if k != "path"} for row in rows[12:]]
+    for bad in (["--out", str(tmp_path / "bad"), "--profile", "wide", "--n", "1,2", "--tiers", "1,2,3,4"],
+                ["--out", str(tmp_path / "bad"), "--profile", "wide", "--n", "1", "--tiers", "0,1"],
+                ["--out", str(tmp_path / "bad"), "--profile", "wide", "--from-suite", str(SUITES / "dev_v1.jsonl")],
+                ["--out", str(tmp_path / "bad"), "--extend", str(tmp_path / "v2" / "manifest.jsonl"), "--profile", "wide",
+                 "--n", "2", "--tiers", "2,3", "--seed", "500"],                           # names of the extended set
+                ["--out", str(tmp_path / "w"), "--extend", str(tmp_path / "w" / "manifest.jsonl"), "--n", "1"]):
+        with pytest.raises(SystemExit):
+            cli.main(bad)
+    assert not (tmp_path / "bad").exists()
+    with pytest.raises(ValueError):
+        cli.make_set([1, 2], [1, 2, 3], seed=0, randomize=0.0, exclude=set())
 
 
 def test_cli_keeps_training_and_suite_seeds_apart(tmp_path):
@@ -628,6 +864,41 @@ def test_navigation_suites_are_the_frozen_maps_without_monsters(name):
         assert row == {**layouts.without_monsters(full), "name": full["name"].replace(full_name, name)}
         assert row["episode_ticks"] == full["episode_ticks"] and row["counts"]["locks"] == full["counts"]["locks"]
         check_map(row, bare=True)
+
+
+WIDE_SUITES = {"heldout_wide_v1": 50, "dev_wide_v1": 15}
+
+
+@pytest.mark.parametrize("name", sorted(WIDE_SUITES))
+def test_wide_suites_are_frozen(name):
+    """The two suites of the wide profile: recorded checksums, tiers 1 to 4, reserved seeds, the
+    reference dialect, no grid shared with another suite, and rows the wide profile still generates."""
+    path = SUITES / f"{name}.jsonl"
+    rows = cli.read_rows(path)
+    assert cli.suite_checksums(path) == json.loads((SUITES / "checksums.json").read_text())[path.name]
+    assert len(rows) == 4 * WIDE_SUITES[name] and [row["name"] for row in rows] == \
+        [f"{name}_t{tier}_{i:03d}" for tier in (1, 2, 3, 4) for i in range(WIDE_SUITES[name])]
+    for row in rows:
+        assert row["seed"] >= cli.RESERVED_SEED and set(row["options"]) <= {"ambush"} and set(cli.SUITE_KEYS) == set(row)
+        check_map(row, profile="wide")
+    for row in rows[::7]:
+        m = layouts.generate(row["tier"], row["seed"], "wide")
+        assert (m["grid"], m["episode_ticks"], m["options"], m["counts"]) == (row["grid"], row["episode_ticks"], row["options"], row["counts"])
+    others = set()
+    for other in sorted(SUITES.glob("*.jsonl")):
+        if other != path:
+            others |= {row["grid"] for row in cli.read_rows(other)}
+    assert len({row["grid"] for row in rows}) == len(rows) and not {row["grid"] for row in rows} & others
+    with pytest.raises(FileExistsError):
+        cli.freeze_suite(path, 1, [1], cli.RESERVED_SEED, profile="wide")
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name", sorted(WIDE_SUITES))
+def test_wide_suite_maps_play_in_the_engine(tmp_path, name):
+    rows = cli.read_rows(SUITES / f"{name}.jsonl")
+    for row in rows[:: max(1, len(rows) // 40)]:
+        _engine_check(tmp_path, row, steps=40, within=0.85)
 
 
 @pytest.mark.slow

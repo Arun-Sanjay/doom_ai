@@ -5,10 +5,17 @@ where the agent starts, without changing the grid itself:
 
 * start pose: the player is rotated (a multiple of 90 degrees or any angle) and shifted by up to 16
   units inside its cell, so walls do not line up with the axes or the 64-unit cells of the agent's
-  start frame;
+  start frame (`random_options` draws it for the first training set; `random_start` draws it with
+  explicit probabilities, see below);
 * things: random facing for monsters and a few extra ambush flags;
 * looks: sector light, room floor and wall textures, ceiling, the wall around the exit pad;
 * doors: now and then a different delay before an ordinary door closes.
+
+A start is "on the grid" when the player stands on a cell centre and faces along an axis: the walls
+then lie on the 64-unit cells of the agent's start frame, as they do in every reference map. A
+quarter turn keeps that, any other heading or an offset breaks it. `random_start(rng, quarter,
+arbitrary, offset)` draws the start pose alone, each kind with its own probability, so that off-grid
+starts can be kept to a small share of a set; `start_on_grid(options)` tells which maps they are.
 
 The exit pad keeps its floor (GATE3) in every map: it is the one visual cue for the exit.
 All texture names exist in the Freedoom IWAD shipped with ViZDoom (checked by the tests). Animated
@@ -54,21 +61,73 @@ DOOR_DELAYS = (105, 120, 175, 200, 250)
 MAX_START_OFFSET = 16       # the player has radius 16 and a cell is 64 wide
 
 
-def random_options(rng: random.Random, grid: str, base: dict | None = None) -> dict:
-    """Randomised build options for `grid`, merged over `base` (the options the layout came with)."""
+# Probabilities of `random_start` for a training set: (quarter turn, arbitrary heading, sub-cell offset).
+START_DEFAULTS = (0.5, 0.05, 0.05)
+QUARTER_TURNS = (90, 180, 270)
+OFF_AXIS_ANGLES = tuple(a for a in range(360) if a % 90)
+
+
+def random_start(rng: random.Random, quarter: float = START_DEFAULTS[0], arbitrary: float = START_DEFAULTS[1],
+                 offset: float = START_DEFAULTS[2]) -> dict:
+    """Start-pose build options, each kind drawn with its own probability.
+
+    quarter    the player faces north, west or south instead of east; the start stays on the grid.
+    arbitrary  the player faces a whole-degree heading that is not a multiple of 90: off the grid.
+    offset     the player is shifted by up to 16 units on each axis, never by (0, 0): off the grid.
+
+    The heading is one draw (quarter turn, arbitrary, or east as stored: `quarter + arbitrary` may
+    not exceed 1) and the offset is independent of it, so a share
+    `1 - (1 - arbitrary) * (1 - offset)` of the maps starts off the grid.
+    """
+    for name, p in (("quarter", quarter), ("arbitrary", arbitrary), ("offset", offset)):
+        if not 0.0 <= p <= 1.0:
+            raise ValueError(f"{name}: a probability is between 0 and 1, got {p}")
+    if quarter + arbitrary > 1.0 + 1e-9:
+        raise ValueError("quarter + arbitrary may not exceed 1: they are two outcomes of one draw")
+    opts: dict = {}
+    roll = rng.random()
+    if roll < quarter:
+        opts["start_angle"] = rng.choice(QUARTER_TURNS)
+    elif roll < quarter + arbitrary:
+        opts["start_angle"] = rng.choice(OFF_AXIS_ANGLES)
+    if rng.random() < offset:
+        shift = [0, 0]
+        while not any(shift):
+            shift = [rng.randint(-MAX_START_OFFSET, MAX_START_OFFSET), rng.randint(-MAX_START_OFFSET, MAX_START_OFFSET)]
+        opts["start_offset"] = shift
+    return opts
+
+
+def start_on_grid(options: dict | None) -> bool:
+    """True when the build options leave the player start on a cell centre, facing along an axis."""
+    options = options or {}
+    offset = options.get("start_offset") or (0, 0)
+    turn = float(options.get("start_angle") or 0) % 90.0
+    return all(abs(float(v)) < 1e-6 for v in offset) and min(turn, 90.0 - turn) < 1e-6
+
+
+def random_options(rng: random.Random, grid: str, base: dict | None = None, start: bool = True) -> dict:
+    """Randomised build options for `grid`, merged over `base` (the options the layout came with).
+
+    With `start` (the default, and what the first training set was built with) the start pose is
+    part of the draw: a quarter turn on 35% of the maps, any heading on 50%, an offset on 60%, which
+    leaves about one map in five on the grid. With `start=False` the start pose is left alone, for
+    callers that set it with `random_start`.
+    """
     opts = dict(base or {})
     rows = udmf.parse_grid(grid)
     sectors = len(udmf.assign_sectors(rows)[1])
     monsters = [(c, r) for r, row in enumerate(rows) for c, ch in enumerate(row) if ch in udmf.MONSTER_CHARS]
 
-    roll = rng.random()
-    if roll < 0.35:
-        opts["start_angle"] = rng.choice((90, 180, 270))
-    elif roll < 0.85:
-        opts["start_angle"] = rng.randrange(360)
-    if rng.random() < 0.6:
-        opts["start_offset"] = [rng.randint(-MAX_START_OFFSET, MAX_START_OFFSET),
-                                rng.randint(-MAX_START_OFFSET, MAX_START_OFFSET)]
+    if start:
+        roll = rng.random()
+        if roll < 0.35:
+            opts["start_angle"] = rng.choice((90, 180, 270))
+        elif roll < 0.85:
+            opts["start_angle"] = rng.randrange(360)
+        if rng.random() < 0.6:
+            opts["start_offset"] = [rng.randint(-MAX_START_OFFSET, MAX_START_OFFSET),
+                                    rng.randint(-MAX_START_OFFSET, MAX_START_OFFSET)]
 
     if monsters and rng.random() < 0.8:
         opts["thing_angles"] = {f"{c},{r}": 45 * rng.randrange(8) for c, r in monsters}

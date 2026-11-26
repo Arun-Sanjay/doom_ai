@@ -9,6 +9,11 @@
     "file_sha256": "2faad082236926966962dcd85ec76163891eb725c7e47cb3c4b6bd2241ebbd3a",
     "wads_sha256": "9f8829401ffb863aff74d9c165aab940bd4e81b0b1d304020b61098d9f0fa8b8"
   },
+  "dev_wide_v1.jsonl": {
+    "maps": 60,
+    "file_sha256": "7bcad244cfcc31fc169be6ca168216b66a2bd8dd98d60e392882bb8007e8d025",
+    "wads_sha256": "7470d88d8fe59db17d37ddd32cfc6ee1e485da2817d647a51b3b7f9ed738f5f7"
+  },
   "heldout_nav_v1.jsonl": {
     "maps": 300,
     "file_sha256": "ab5a59cafb8786c23adfa9523cb6c085f49f5cdbc3707ccc4bfe5e098242305c",
@@ -18,5 +23,10 @@
     "maps": 400,
     "file_sha256": "cc6abd4873e17654d80bad3a6153a29fde8661d478f17450d571d7feaa9ac9cd",
     "wads_sha256": "99f242b6a8696ee4c9455ee95f33fbafbd4d3303d3a12a9acb368977c5d5e25c"
+  },
+  "heldout_wide_v1.jsonl": {
+    "maps": 200,
+    "file_sha256": "4a04fe3c850acee4b69e8f7f991f5e41dba10e6011a5a34c85ab93b6e1059aa1",
+    "wads_sha256": "11041a92be67d68d34d1b4a3ca2b7960aafa1a808a393fe3c3a492358c561715"
   }
 }
