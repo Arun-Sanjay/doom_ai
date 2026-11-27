@@ -10,7 +10,7 @@ evaluation categories, a curiosity reward and a curriculum. Combat is learned by
 random weights. Navigation is kickstarted by a scripted teacher that exists only at training time
 (`training/teacher/`, never imported by the agent). Its weight in the loss is stepped down as the
 policy's own held-out exit rate rises; it reached zero 44.2 M steps into the second training phase,
-and the shipped checkpoint has had {{FINAL_RL_ONLY_STEPS}} M further steps of reinforcement learning
+and the shipped checkpoint has had 127.8 M further steps of reinforcement learning
 alone. There is no rule tree, no path search and no aiming maths in `submission/`; the only
 hand-written code that touches action choice is two action masks computed from observation fields
 (`submission/doomnet/spec.py`), and a lint test enforces this on every push.
@@ -29,7 +29,7 @@ committed weights; the last column is where to read it.
 | Reward shaping | Terms that mirror the evaluation categories (exit, efficiency, keys and doors, sectors explored, kills) plus small shaping terms: bonus per hit, cost per missed shot, damage, death and door-reversal penalties | `training/rl/reward.py` |
 | Curriculum learning | Staged by tier: combat arenas first; then navigation, doors, keys and the full gauntlet in turn, each stage with its own tier mix; after the first 30 M steps of the last phase, adaptive sampling that favours the tier with the lowest recent exit rate | `training/rl/curriculum.py`, `training/configs/` |
 | Curiosity | **On. Count-based and map novelty, not RND.** Two episodic terms from the agent's own memory map: a bonus for each map cell observed for the first time, and 1/sqrt(n) on the n-th entry into a cell. Own value head, weight 0.3 on the advantage; it contributes about 3.7 of return per episode beside 8.6 of task return. We ran no ablation without it, so we claim no measured gain from it | `training/rl/intrinsic.py` |
-| Imitation, then PPO alone | An imitation term inside PPO, not a separate cloning stage. Combat: PPO alone from random weights. Navigation: the student drives the engine and a scripted teacher labels the states it reaches; the labels enter as a distillation loss beside the PPO loss. Its weight stepped down 0.25, 0.1, 0.03, 0 as the policy's held-out exit rate rose and reached 0 at 44 M steps of the last phase; the shipped weights come from a further {{FINAL_RL_ONLY_STEPS}} M steps of PPO alone | `training/rl/train.py`, `training/rl/ppo.py`, `training/teacher/` |
+| Imitation, then PPO alone | An imitation term inside PPO, not a separate cloning stage. Combat: PPO alone from random weights. Navigation: the student drives the engine and a scripted teacher labels the states it reaches; the labels enter as a distillation loss beside the PPO loss. Its weight stepped down 0.25, 0.1, 0.03, 0 as the policy's held-out exit rate rose and reached 0 at 44 M steps of the last phase; the shipped weights come from a further 127.8 M steps of PPO alone | `training/rl/train.py`, `training/rl/ppo.py`, `training/teacher/` |
 | Action masking | Two masks from observation fields, identical in training and inference: USE only with a door ray within reach; ATTACK only with an enemy in view and a gun selected | `submission/doomnet/spec.py` |
 | Ego-centric occupancy grid | An 11-channel 64 x 64 grid centred on the agent (free, wall, door, locked door, visited, recency, enemy, item, key, exit, used), cut from a map the agent builds from its own actions and observations. Agent-centred, but kept in the start frame's orientation: it does not rotate with the heading | `submission/doomnet/memory.py`, `submission/doomnet/encode.py` |
 | Vectorised environments | 1,536 engine instances in 128 worker processes with batched policy inference on the GPU, 8,000 to 12,000 environment steps per second | `training/rl/vecenv.py`, `training/rl/rollout.py` |
@@ -79,7 +79,7 @@ run and all of phase one.
 | Promoted 12:38 AM (`main_0035`) | phase two, 19.7 M | 0.1 | 87.2 | 84.7 | 81.8 | 46.6 | 68.8 ± 3.9 | 0.71 | 0.72 | 0.18 |
 | Promoted 1:38 AM (`main_0135_dev`) | phase two, 49.2 M | 0 | 91.2 | 86.8 | 85.7 | 62.1 | 77.0 ± 3.9 | 0.83 | 0.75 | 0.13 |
 | Promoted 3:08 AM (`main_0305_dev`) | phase two, 98.3 M | 0 | 83.2 | 89.0 | 92.9 | 59.5 | 77.8 ± 3.8 | 0.82 | 0.78 | 0.14 |
-| **Shipped**: {{FINAL_AGENT}}, chosen {{FINAL_PICKED_AT}} | phase two, {{FINAL_PHASE2_STEPS}} M | 0 | {{FINAL_DEV_T1}} | {{FINAL_DEV_T2}} | {{FINAL_DEV_T3}} | {{FINAL_DEV_T4}} | {{FINAL_DEV_ALL}} | {{FINAL_DEV_EXIT}} | {{FINAL_DEV_KILLS}} | {{FINAL_DEV_DEATHS}} |
+| **Shipped**: main_0525_M, chosen 5:37 AM | phase two, 172.0 M | 0 | 87.2 | 92.1 | 86.8 | 71.8 | 81.9 ± 3.6 | 0.86 | 0.80 | 0.10 |
 
 Twenty maps per tier is a small sample: a single tier moves by several points between two
 checkpoints of the same run (compare tier 1 and tier 4 of the last rows), which is why a promotion
@@ -106,13 +106,13 @@ source of the limits listed below.
 | Promoted 12:38 AM | 61.4 ± 1.2 | 78.0 ± 1.5 | 50.4 ± 2.6 | 74.6 ± 3.0 | 36.5 ± 3.1 |
 | Promoted 1:38 AM | 72.2 ± 1.2 | 83.6 ± 1.3 | 66.2 ± 2.5 | 82.4 ± 2.4 | 52.8 ± 3.4 |
 | Promoted 3:08 AM | 75.5 ± 1.1 | 85.6 ± 1.2 | 69.4 ± 2.5 | 87.2 ± 2.5 | 56.7 ± 3.0 |
-| **Shipped**: {{FINAL_AGENT}} | {{FINAL_HEADLINE}} | {{FINAL_HELDOUT_V1}} | {{FINAL_HELDOUT_WIDE}} | {{FINAL_AUTHORED}} | {{FINAL_AUTHORED_HARD}} |
+| **Shipped**: main_0525_M | 78.4 ± 1.1 | 84.5 ± 1.3 | 77.1 ± 2.1 | 86.7 ± 1.9 | 64.4 ± 3.5 |
 
-Shipped weights: `submission/weights/policy.pt`, sha256 prefix `{{FINAL_POLICY_SHA}}` (the agent
-prints it at start), second-phase checkpoint at {{FINAL_PHASE2_STEPS}} M steps, {{FINAL_TOTAL_STEPS}} M
+Shipped weights: `submission/weights/policy.pt`, sha256 prefix `3f90be8826ef` (the agent
+prints it at start), second-phase checkpoint at 172.0 M steps, 340 M
 environment steps in all (combat 118.8 M, phase one 49.0 M, phase two); and
 `submission/weights/exit_detector.pt`, sha256 prefix `8985406ed0a6`. Decoding setting stored with the
-policy file: {{FINAL_DECODING}}.
+policy file: move, strafe, turn, USE and weapon take their most likely option, attack is sampled, and so are the manager's choices.
 
 ### What the training log shows
 

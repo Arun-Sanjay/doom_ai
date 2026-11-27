@@ -1,10 +1,10 @@
 # DoomNet: a neural DOOM agent with a self-built spatial memory
 
-Yugaantar 2026, DevForge Track 1 "Can It Play DOOM?" · project brief · team {{FINAL_TEAM_NAME}} · https://github.com/Arun-Sanjay/doom_ai
+Yugaantar 2026, DevForge Track 1 "Can It Play DOOM?" · project brief · team Arun-Sanjay (solo entry) · https://github.com/Arun-Sanjay/doom_ai
 
 ## USP
 
-- **Every action is a network output, and the training is reinforcement learning.** Recurrent PPO written in plain torch (`training/rl/`, no RL library). Combat is learned from random weights by PPO alone (118.8 M steps). Navigation is started with a scripted teacher that exists only in training and sees only what the network sees. Its loss weight is stepped down as the policy's own held-out exit rate rises and reached **zero** 44.2 M steps into the second phase; the shipped checkpoint has had {{FINAL_RL_ONLY_STEPS}} M further steps of reinforcement learning alone.
+- **Every action is a network output, and the training is reinforcement learning.** Recurrent PPO written in plain torch (`training/rl/`, no RL library). Combat is learned from random weights by PPO alone (118.8 M steps). Navigation is started with a scripted teacher that exists only in training and sees only what the network sees. Its loss weight is stepped down as the policy's own held-out exit rate rises and reached **zero** 44.2 M steps into the second phase; the shipped checkpoint has had 127.8 M further steps of reinforcement learning alone.
 - **A spatial memory built from the agent's own actions.** The wrapper gives no coordinates. The agent integrates its pose from its buttons, velocity and rays, writes what it sees into an 11-channel grid in the frame of its starting pose, and keeps it for the whole map. The exit pad is absent from rays and entities, so a small CNN finds it in the RGB frame and writes it into the grid.
 - **A custom network, small and CPU-only.** A 1,307,153-parameter policy (circular ray convolution, entity attention, a manager, a value-propagation block, a GRU controller with six factored heads) and a 416,867-parameter exit detector. `submission/` has no rule tree, no path search and no aiming maths. One decision takes 2.4 ms (median) on one CPU inside the template's Docker image, against a budget of 40 ms.
 - **Measured, with the limits written down.** Frozen held-out suites, promotion only on a paired win beyond noise and a nine-check ship gate, validation from a fresh clone. The last section states the limits, including a manager whose choices have become close to uniform.
@@ -66,9 +66,9 @@ Yugaantar 2026, DevForge Track 1 "Can It Play DOOM?" · project brief · team {{
 | Promoted 12:38 AM | phase two, 19.7 M | 0.1 | 87.2 | 84.7 | 81.8 | 46.6 | 68.8 ± 3.9 | 0.71 | 61.4 ± 1.2 |
 | Promoted 1:38 AM | phase two, 49.2 M | 0 | 91.2 | 86.8 | 85.7 | 62.1 | 77.0 ± 3.9 | 0.83 | 72.2 ± 1.2 |
 | Promoted 3:08 AM | phase two, 98.3 M | 0 | 83.2 | 89.0 | 92.9 | 59.5 | 77.8 ± 3.8 | 0.82 | 75.5 ± 1.1 |
-| **Shipped**, {{FINAL_PICKED_AT}} | phase two, {{FINAL_PHASE2_STEPS}} M | 0 | {{FINAL_DEV_T1}} | {{FINAL_DEV_T2}} | {{FINAL_DEV_T3}} | {{FINAL_DEV_T4}} | {{FINAL_DEV_ALL}} | {{FINAL_DEV_EXIT}} | {{FINAL_HEADLINE}} |
+| **Shipped**, 5:37 AM | phase two, 172.0 M | 0 | 87.2 | 92.1 | 86.8 | 71.8 | 81.9 ± 3.6 | 0.86 | 78.4 ± 1.1 |
 
-Shipped policy file: {{FINAL_AGENT}}, sha256 {{FINAL_POLICY_SHA}}, {{FINAL_TOTAL_STEPS}} M environment steps in all. Decoding: {{FINAL_DECODING}}.
+Shipped policy file: main_0525_M, sha256 3f90be8826ef, 340 M environment steps in all. Decoding: move, strafe, turn, USE and weapon take their most likely option, attack is sampled, and so are the manager's choices.
 
 ## Rule compliance and limits
 
