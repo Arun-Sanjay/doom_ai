@@ -5,6 +5,11 @@ gives the tensor shapes, how the module works and the reason for each design cho
 follows the module docstrings under `submission/doomnet/`, which are the reference; where this file
 and a docstring disagree, the docstring describes the code.
 
+This file describes what the code computes. What the trained, shipped weights make of it is a
+separate question with a measured answer, and for the manager that answer limits what can be
+claimed: its sub-goal and target choices are close to uniform in the shipped weights. Section 6e
+states this with the numbers; read it together with 6b to 6d.
+
 ```
  observation ──> 1 odometry ──> 2 exit detector ──> 3 memory map ──> 4 encoder, masks ──> 5 PolicyNet ──> 9 buttons
                  pose             RGB -> sighting     write, crop       fixed-size inputs     manager (1 step in 8),
@@ -18,7 +23,7 @@ and a docstring disagree, the docstring describes the code.
 | Spatial memory | `submission/doomnet/memory.py` | write path no; read by learned modules | 0 |
 | Encoder | `submission/doomnet/encode.py` | no | 0 |
 | Exit detector | `submission/doomnet/model.py`, `ExitDetector` | yes, supervised | 416,867 |
-| Policy | `submission/doomnet/model.py`, `PolicyNet` | yes, PPO and distillation | 1,307,153 |
+| Policy | `submission/doomnet/model.py`, `PolicyNet` | yes: PPO, plus distillation from a training-only teacher until its weight reached zero | 1,307,153 |
 | Assembly | `submission/agent.py` | no (pipeline, decoding, time governor, exception handler) | 0 |
 
 Parameters of `PolicyNet` by part: ray encoder 155,008; entity encoder and attention queries
@@ -57,7 +62,9 @@ logits, and training gives each head its own entropy bonus and its own distillat
 get_pickup)`. The manager chooses one and points at a target cell every `MANAGER_PERIOD = 8`
 decisions. No code acts on the choice: it reaches the controller only as an embedding and as the
 target of the value-propagation block (`agent.debug_state()` reports it to the viewer, and that is
-the only place it is read).
+the only place it is read). The names are the labels the training-time teacher used; in the shipped
+weights the choice is close to uniform (section 6e), so a sub-goal shown by the viewer says little
+about what the agent is doing.
 
 **Action masks** (`action_masks`), the only hand-written code that touches action choice:
 
@@ -114,11 +121,16 @@ friction model, and the rays measure the few steps the model cannot predict, so 
 (see Measured). That matters because the memory map is written with this pose: an error in the
 pose becomes an error in the map.
 
-**Measured.** 320 episodes on 80 generated maps with monsters: final position error median 0.04,
-90th percentile 0.27, worst 12.0 map units (one grid cell is 64 units); heading error at most
-1.5e-9 rad over 47,716 steps with attacks. Known weak spots: a monster that pushes the agent along
-a one-cell corridor (how far the monster moves within a step cannot be observed; up to 45 units in
-a stress test), and standing on a pickup that cannot be taken. Cost: about 0.12 ms per decision.
+**Measured.** The local scorer compares the agent's pose estimate with the true pose in every
+scored episode (`training/logs/results.csv`, columns `odom_err_final`, `odom_err_max`,
+`odom_heading_err_max`). For the agent promoted at 3:08 AM: mean final position error 0.32 map
+units over the 80 `dev_v1` episodes and 0.20 over the 60 `dev_wide_v1` episodes (one grid cell is
+64 units), and a heading error of zero in every episode (tags `main_0305_dev`, `main_0305_wide`).
+An earlier drift script (26 Nov, 320 episodes on 80 generated maps with monsters; its output is not
+in the repository) gave a median of 0.04, a 90th percentile of 0.27 and a worst case of 12.0 units.
+Known weak spots: a monster that pushes the agent along a one-cell corridor (how far the monster
+moves within a step cannot be observed; up to 45 units in a stress test of that script), and
+standing on a pickup that cannot be taken. Cost: 0.06 ms per decision (`training/logs/latency.txt`).
 
 ---
 
@@ -297,8 +309,10 @@ iteration networks. The cell is a Bellman backup whose parts are all learned:
   cannot tell the two apart, which is why it is stated here.
 - *Seeded by the chosen cell.* The field is a function of the choice in force, which makes forced
   re-evaluation in training and the sub-goal clamp well defined.
-- *Supervision.* In training the field is regressed on 0.95 ^ (the teacher's travel steps to the
-  target), which has the same form as a discounted value.
+- *Supervision.* While the teacher's loss weight is above zero, the field is regressed on
+  0.95 ^ (the teacher's travel steps to the target), which has the same form as a discounted
+  value. Once the weight is zero nothing supervises the field directly: it is trained only through
+  the controller's use of the patch it reads.
 - *Cost.* Tower and propagation run on one decision in 8 and their output is held in the state.
 
 ### 6d. Goal bottleneck, GRU and heads (every decision)
@@ -337,7 +351,59 @@ since the manager last ran.
 **Why this design overall.** The costly map tower and value propagation run once per 8 decisions
 and are cached, the per-decision controller is a few dozen small operators, and the three levels
 are separate enough to be supervised and inspected one by one: sub-goal and target by the
-manager's labels and by PPO, the field by a regression target, the buttons by PPO.
+manager's labels and by PPO, the field by a regression target, the buttons by PPO. That
+inspectability is what showed the result of section 6e.
+
+### 6e. What the shipped weights do with the hierarchy (measured)
+
+The manager and the value-propagation block were trained with the teacher's labels: a sub-goal and
+a target cell for the manager, a travel-step field for the propagation. Those labels entered the
+loss with a weight that was stepped down as the policy's own held-out exit rate rose, and that
+weight reached zero 44.2 M steps into the second training phase (iteration 450). From that step
+on the run is reinforcement learning alone, and the two manager heads are trained only by the PPO
+gradient and their entropy bonus.
+
+What happened to them, from `training/logs/unified_full_2_train_log.csv` (statistics over whole
+rollouts, about 98,000 decisions per iteration):
+
+| Iteration of phase two | Steps | Sub-goal entropy (max 2.08 nats) | Target entropy (max 8.32) | Agreement with the teacher: sub-goal | target | Held-out exit rate at the last report |
+|---|---|---|---|---|---|---|
+| 450 (teacher weight reaches 0) | 44.2 M | 0.68 | 1.56 | 0.84 | 0.63 | 0.77 |
+| 500 | 49.2 M | 1.92 | 3.76 | 0.31 | 0.46 | 0.77 |
+| 600 | 59.0 M | 2.01 | 6.98 | 0.15 | 0.21 | 0.83 |
+| 750 | 73.7 M | 2.03 | 7.73 | 0.15 | 0.05 | 0.85 |
+| 899 (end of the log copy) | 88.4 M | 2.03 | 7.65 | 0.15 | 0.03 | 0.85 |
+
+On recorded inputs (`training/logs/manager_probe.txt`: 80 decisions of the provenance probe, 10 of
+them manager steps, so a small sample) the
+checkpoint promoted at 3:08 AM (iteration 1,000) has a sub-goal entropy of 2.01 nats with a mean
+top probability of 0.19 (a uniform choice has 0.125), and a target entropy of 7.44 nats with a
+mean top probability of 0.005; the checkpoints at iterations 1,225 and 1,525 are the same within
+0.4 nats. The first shipped agent, trained with the teacher throughout, has 0.15 and 0.62 nats.
+"The shipped weights" below means a policy file of this lineage from iteration 1,000 on, which is
+what the top-level README names as shipped; the probe was run on the three checkpoints listed
+here.
+
+What follows, and what does not:
+
+- In the shipped weights the manager's sub-goal and target are close to random draws (the agent
+  samples them, section 7). The hierarchy is in the architecture and was trained with the
+  teacher; it is not what steers the shipped agent. We do not claim that the agent plans through
+  sub-goals or that it walks towards a target cell it has chosen.
+- The buttons come from the controller: its rays, entities and scalars, its recurrent state, and
+  the 9 × 9 patch of the value field. The field is still computed from the map tower's features
+  on every manager step, now seeded by a near-random target and conditioned on a near-random
+  sub-goal. The memory map therefore reaches the action heads only through that patch (the
+  bottleneck of 6d), and how much it carries in the shipped weights has not been measured.
+- The controller is still conditioned on what it is given. In the same probe, replacing the
+  manager's sub-goal by another one moves the move and strafe probabilities by about 0.10 in total
+  variation, and replacing the target by 0.03 to 0.04. With a near-uniform sub-goal this is
+  variation in the controller's behaviour from one 8-decision period to the next, not a plan.
+- Scores rose while this happened: the held-out exit rate in the table, and the development and
+  held-out composites of the agents promoted after iteration 450 (top-level README, Results). We
+  cannot say whether the same network with a working manager would score higher. We can say that
+  the shipped agent's score is earned by the recurrent controller, its sensors and the value-field
+  patch.
 
 ---
 
@@ -352,18 +418,24 @@ store it) → `PolicyNet` → decoding. *Why one fixed pipeline:* it is the same
 workers run, so the networks meet at evaluation exactly the inputs they were trained on; a test
 compares the two paths value by value.
 
-**Decoding.** USE and weapon take their most likely option, because a second USE press on a moving
-door reverses it. Move, strafe, turn and attack are sampled, as in training, and so are the
-manager's sub-goal and target. The generators belong to the agent and are re-seeded in `reset()`,
-so a map always plays the same way.
+**Decoding.** Each head is decoded in one of two fixed ways: by its most likely option, or by a
+draw from its distribution, as in training. Which heads take the most likely option is a setting
+stored with the weights (`greedy_heads` in the config of `weights/policy.pt`). A file without that
+entry gets the default: USE and weapon take their most likely option, because a second USE press
+on a moving door reverses it, and move, strafe, turn and attack are sampled. The agent prints the
+setting in force when it starts, and the top-level README names the setting of the shipped file.
+The setting never looks at an observation. The manager's sub-goal and target are always sampled.
+The generators belong to the agent and are re-seeded in `reset()`, so a map always plays the same
+way.
 
 **Not learned in this file, and none of it reads an observation to choose a button:**
 
 - the two masks of section 1, applied to the logits before decoding;
 - a time governor driven only by the clock: if the mean `act()` time on the current map passes
   24 ms the exit detector rests on odd decisions, and past 32 ms the policy network does too and
-  the previous action is repeated (still under the masks). Neither level engaged in any
-  measurement (means of 2 to 8 ms);
+  the previous action is repeated (still under the masks). In the scoring runs of the agent in
+  `training/logs/results.csv` (49 by 5:26 AM) the mean `act()` time was 1.5 to 6.6 ms, far below
+  the first threshold;
 - an exception handler: a decision on which an internal error occurred answers with no buttons,
   the agent's state is cleared, and the network carries on at the next decision.
 
@@ -373,9 +445,12 @@ CUDA is never initialised. Weights are loaded and every code path is run a few t
 when a weights file is missing, is a Git LFS pointer, does not fit its network, or holds a
 non-finite value.
 
-**Cost per decision** (one laptop thread, microseconds): odometry 123, exit detector 788, memory
-update 205, crop 148, encoder and masks 72, policy 915, decoding 42; 2.3 ms in total against a
-budget of 40 ms.
+**Cost per decision** (`training/logs/latency.txt`, one laptop thread): exit detector 0.37 ms,
+policy network 0.38 ms, memory update and crop 0.18 ms, odometry 0.06 ms, encoder 0.04 ms,
+decoding 0.01 ms; 1.05 ms on average against a budget of 40 ms (2.0 ms on the one decision in 8
+that runs the manager, 0.9 ms on the others). In the official validator on a fresh clone, inside
+the template's Docker image on one CPU: median 2.4 ms, maximum 7 ms over one episode of 46 decisions
+(`training/logs/fresh_clone_validation.txt`).
 
 ---
 

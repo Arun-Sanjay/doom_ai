@@ -1,0 +1,83 @@
+Where the agent of 1:38 AM (main_0135, policy sha256 432f14888ea9) loses episodes
+==================================================================================
+
+Curated excerpt. Source: the per-episode rows of the final-pick scoring of that agent on the four
+held-out suites (heldout_v1, heldout_wide_v1, authored_v1, authored_hard_v1; 1,195 episodes, played
+2026-11-27 02:31 IST by `python -m training.final_pick score`), summarised by analysis scripts that are
+not part of the repository. The report of the same scoring run is
+final_pick_report_shipped_main_0035_vs_shipped_main_0135.txt in this folder.
+heavy = a hell knight or a cacodemon on the map; reference = zombieman, imp, chaingunner;
+tmo = the tick cap ran out; a map played with several seeds counts once in `maps`.
+These tables were not repeated for later agents.
+
+RATES PER TIER, maps WITHOUT a heavy monster (counted maps, 4 suites pooled, each map once)
+tier  maps episodes    exit +-      dead +-       tmo +-      score +-     | episodes: exit dead tmo
+1       63       91   0.895 0.038  0.105 0.038  0.000 0.000   84.71 3.29   |   82    9    0
+2      180      300   0.899 0.021  0.000 0.000  0.101 0.021   84.13 1.44   |  265    0   35
+3      177      285   0.818 0.028  0.029 0.013  0.153 0.026   81.42 1.82   |  224    6   55
+4       65      105   0.652 0.059  0.160 0.042  0.188 0.045   70.28 3.90   |   48   20   37
+all    485      781   0.836 0.016  0.046 0.009  0.118 0.014   81.36 1.10   |  619   35  127
+
+RATES PER TIER, maps WITH a heavy monster
+tier  maps episodes    exit +-      dead +-       tmo +-      score +-     | episodes: exit dead tmo
+1       38       86   0.689 0.070  0.289 0.071  0.021 0.010   62.30 5.82   |   67   15    4
+2        0
+3        2       10   0.500 0.500  0.100 0.100  0.400 0.400   61.83 34.32  |    5    1    4
+4      115      195   0.369 0.044  0.450 0.044  0.181 0.033   45.97 3.25   |   52   83   60
+all    155      291   0.449 0.039  0.406 0.038  0.145 0.026   50.18 2.87   |  124   99   68
+
+TIMEOUTS BY CAUSE, maps WITHOUT a heavy monster
+tier cause                                      episodes  maps mean score cells seen doors open dmin<160 stuck>.1
+2    gates done (or none), exit never in view         30    21       34.5       0.45       0.68        8        0
+2    exit was in view, not reached                     5     5       45.3       0.40       0.97        3        0
+3    has key, locked door never opened                21    14       31.9       0.56       0.89        6        0
+3    gates done (or none), exit never in view         17    14       44.1       0.59       0.84        9        0
+3    key never picked up                              17    12       19.8       0.41       0.63        2        0
+4    key never picked up                              26    10       24.1       0.40       0.78        2        0
+4    has key, locked door never opened                 6     4       37.8       0.50       0.76        0        0
+4    gates done (or none), exit never in view          4     4       40.3       0.47       0.81        1        0
+4    exit was in view, not reached                     1     1       46.2       0.68        nan        0        0
+all  gates done (or none), exit never in view         51    39       38.2       0.50       0.72       18        0
+all  key never picked up                              43    22       22.4       0.40       0.72        4        0
+all  has key, locked door never opened                27    18       33.2       0.55       0.86        6        0
+all  exit was in view, not reached                     6     6       45.5       0.45       0.97        3        0
+
+DEATHS, maps WITHOUT a heavy monster
+suite            tier  episodes  maps mean score kills/monsters median death tic
+ALL              1            9     7       11.5           0.43              284
+ALL              3            6     6       21.8           0.49             1146
+ALL              4           20    14       21.9           0.49             2119
+ALL              all         35    27       19.2           0.48             1131
+
+BY CHAINGUNNERS ON THE MAP
+shipped_main_0135: light maps (no heavy monster, counted), by chaingunners on the map
+tier group              maps episodes  exit  dead   tmo death rate mean score
+1    1 chaingunner        15       15    12     3     0      0.200       72.8
+1    2+ chaingunners       4        8     2     6     0      0.750       34.8
+1    no chaingunner       44       68    68     0     0      0.000       94.8
+2    1 chaingunner         3       15    14     0     1      0.000       86.9
+2    no chaingunner      177      285   251     0    34      0.000       82.9
+3    1 chaingunner        29       37    28     3     6      0.081       78.7
+3    2+ chaingunners       2        2     1     1     0      0.500       48.5
+3    no chaingunner      146      246   195     2    49      0.008       80.1
+4    1 chaingunner        38       74    27    15    32      0.203       49.8
+4    2+ chaingunners       8       12     3     4     5      0.333       42.1
+4    no chaingunner       19       19    18     1     0      0.053       91.2
+all  1 chaingunner        85      141    81    21    39      0.149       63.8
+all  2+ chaingunners      14       22     6    11     5      0.500       40.1
+all  no chaingunner      386      618   532     3    83      0.005       83.4
+
+BY MONSTER KIND
+light maps that contain the monster (episodes; a map with several kinds is in several rows)
+chaingunner        163 exit   87 dead   32 tmo   44  death rate 0.196
+demon              374 exit  260 dead   26 tmo   88  death rate 0.070
+imp                608 exit  462 dead   29 tmo  117  death rate 0.048
+lost soul          130 exit   84 dead   19 tmo   27  death rate 0.146
+shotgun guy        518 exit  381 dead   29 tmo  108  death rate 0.056
+spectre             72 exit   42 dead   10 tmo   20  death rate 0.139
+zombieman          614 exit  469 dead   31 tmo  114  death rate 0.050
+
+SHOTS PER KILL (measured on the agent of 12:38 AM, main_0035, policy sha256 812048ff5f86; dev_v1 and
+dev_wide_v1, 70 episodes per tier, two engine seeds per map)
+  tier 4: shots fired per episode mean 46; shots per kill 9.0; monsters per map mean 9.8; episodes that reached 0 bullets: 10/70
+  tier 1: shots fired per episode mean 23; shots per kill 5.5; monsters per map mean 5.0; episodes that reached 0 bullets: 0/70

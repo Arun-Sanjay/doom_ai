@@ -1,0 +1,114 @@
+Manager probe: what the manager's two heads output in the promoted checkpoints
+==============================================================================
+
+Measured 2026-11-27 about 5:00 IST on the development Mac, CPU, no environment: the networks are run on
+the recorded inputs of the provenance probe (training/rl/probe_episodes.npz, 2 episodes x 40 decisions,
+so 10 manager steps) with the script printed at the end of this file. Checkpoints are the files pulled
+from the training machine at each check-in (runs/, not tracked); `it` is the iteration of the second
+phase (runs/unified_full_2), except the last row, which is the first shipped agent (first phase).
+The policy file shipped when this was measured (sha256 e2a54cd164bf, commit 16f3ac7) is the export of
+iteration 1000; the row marked `shipped` is that file's checkpoint.
+
+(a) entropy of the manager's own distributions in nats, and the mean probability of its top choice.
+    A uniform choice has entropy ln 8 = 2.079 (sub-goal) and ln 4096 = 8.318 (target cell).
+(b) how far the controller's head probabilities move (mean total-variation distance per head) when the
+    manager's choices are replaced by random other ones on the same recorded inputs.
+
+The same drift over whole rollouts (about 98,000 decisions per iteration) is in the columns ent_subgoal,
+ent_target, agree_subgoal and agree_target of unified_full_2_train_log.csv in this folder.
+
+probe: 2 episodes x 40 steps; max entropy: sub-goal ln 8 = 2.079, target ln 4096 = 8.318
+(a) it200 (main_0035)              it 200 steps 19660800: sub-goal entropy 0.235 (top p 0.916) | target entropy 0.997 (top p 0.6569)
+(a) it500 (main_0135)              it 500 steps 49152000: sub-goal entropy 1.824 (top p 0.287) | target entropy 2.669 (top p 0.4443)
+(a) it725 (main_0220)              it 725 steps 71270400: sub-goal entropy 2.003 (top p 0.204) | target entropy 7.399 (top p 0.0382)
+(a) it1000 (main_0305, shipped)    it 1000 steps 98304000: sub-goal entropy 2.009 (top p 0.191) | target entropy 7.436 (top p 0.0053)
+(a) it1225 (main_0355)             it 1225 steps 120422400: sub-goal entropy 1.997 (top p 0.204) | target entropy 7.320 (top p 0.0070)
+(a) it1525 (main_0445)             it 1525 steps 149913600: sub-goal entropy 2.024 (top p 0.187) | target entropy 7.055 (top p 0.0088)
+(a) p1 it425 (unified_it425)       it 425 steps 41779200: sub-goal entropy 0.149 (top p 0.961) | target entropy 0.618 (top p 0.8087)
+(b) mean total-variation distance per head when the manager's forced choices are swapped (8 random alternatives vs one base)
+                                   changed             move  strafe    turn  attack     use  weapon
+    it200 (main_0035)              sub-goal+target   0.0856  0.1042  0.0590  0.0078  0.0034  0.0094
+    it200 (main_0035)              sub-goal only     0.0709  0.0978  0.0475  0.0050  0.0029  0.0118
+    it200 (main_0035)              target only       0.0474  0.0371  0.0307  0.0056  0.0014  0.0062
+    it500 (main_0135)              sub-goal+target   0.0604  0.1223  0.0433  0.0139  0.0025  0.0034
+    it500 (main_0135)              sub-goal only     0.0538  0.1089  0.0365  0.0096  0.0021  0.0045
+    it500 (main_0135)              target only       0.0331  0.0592  0.0276  0.0087  0.0009  0.0020
+    it725 (main_0220)              sub-goal+target   0.0938  0.1166  0.0567  0.0134  0.0000  0.0000
+    it725 (main_0220)              sub-goal only     0.0930  0.1118  0.0481  0.0135  0.0000  0.0000
+    it725 (main_0220)              target only       0.0250  0.0356  0.0193  0.0047  0.0000  0.0000
+    it1000 (main_0305, shipped)    sub-goal+target   0.1045  0.1166  0.0518  0.0100  0.0000  0.0000
+    it1000 (main_0305, shipped)    sub-goal only     0.1016  0.1137  0.0532  0.0092  0.0000  0.0001
+    it1000 (main_0305, shipped)    target only       0.0291  0.0387  0.0222  0.0038  0.0000  0.0000
+    it1225 (main_0355)             sub-goal+target   0.0981  0.1365  0.0581  0.0086  0.0007  0.0000
+    it1225 (main_0355)             sub-goal only     0.0955  0.1296  0.0508  0.0084  0.0005  0.0000
+    it1225 (main_0355)             target only       0.0257  0.0398  0.0193  0.0036  0.0004  0.0000
+    it1525 (main_0445)             sub-goal+target   0.0730  0.1133  0.0440  0.0125  0.0020  0.0000
+    it1525 (main_0445)             sub-goal only     0.0739  0.1033  0.0416  0.0071  0.0019  0.0000
+    it1525 (main_0445)             target only       0.0248  0.0383  0.0195  0.0074  0.0005  0.0000
+    p1 it425 (unified_it425)       sub-goal+target   0.0736  0.1068  0.0963  0.0157  0.0053  0.0256
+    p1 it425 (unified_it425)       sub-goal only     0.0600  0.0998  0.0710  0.0105  0.0036  0.0225
+    p1 it425 (unified_it425)       target only       0.0391  0.0639  0.0642  0.0094  0.0026  0.0134
+
+------------------------------------------------------------------------------
+Script
+------------------------------------------------------------------------------
+"""Part (a) and (b) of data/plateau/manager_probe.py on more checkpoints, read-only."""
+import sys, math
+import numpy as np, torch
+sys.path.insert(0, ".")
+from training import paths  # noqa: F401
+from doomnet import spec
+from training.rl import deps, provenance
+torch.set_num_threads(2)
+CK = {"it200 (main_0035)": "runs/vast/checkin/main_0035.pt", "it500 (main_0135)": "runs/vast/checkin/main_0135.pt",
+      "it725 (main_0220)": "runs/vast/checkin/main_0220.pt", "it1000 (main_0305, shipped)": "runs/vast/checkin/main_0305.pt",
+      "it1225 (main_0355)": "runs/vast/checkin/main_0355.pt", "it1525 (main_0445)": "runs/vast/checkin/main_0445.pt",
+      "p1 it425 (unified_it425)": "runs/vast/unified/it_b.pt"}
+P = provenance.probe()
+INP = {k: torch.from_numpy(P[k]) for k in ("rays", "ents", "ent_mask", "scal", "map", "masks")}
+E, T = P["scal"].shape[:2]
+def net_of(state, cfg):
+    net = deps.make_policy("real", **cfg); net.load_state_dict(state); net.eval(); return net
+def run(net, subgoals=None, targets=None, sample=False, seed=0):
+    torch.manual_seed(seed)
+    probs, ent_s, ent_t, top_s, top_t = [], [], [], [], []
+    with torch.no_grad():
+        state = net.initial_state(E, torch.device("cpu"))
+        for t in range(T):
+            m = t // spec.MANAGER_PERIOD
+            forced = {}
+            if subgoals is not None: forced["subgoal"] = torch.as_tensor(subgoals[:, m])
+            if targets is not None: forced["target"] = torch.as_tensor(targets[:, m])
+            runm = torch.full((E,), t % spec.MANAGER_PERIOD == 0)
+            out, state = net(INP["rays"][:, t], INP["ents"][:, t], INP["ent_mask"][:, t], INP["scal"][:, t], INP["map"][:, t],
+                             state=state, masks=INP["masks"][:, t], run_manager=runm, forced=forced or None, sample=sample)
+            probs.append(torch.cat([torch.softmax(l.float(), 1) for l in out["logits"]], 1))
+            if t % spec.MANAGER_PERIOD == 0:
+                ls, lt = torch.log_softmax(out["subgoal_logits"].float(), 1), torch.log_softmax(out["target_logits"].float(), 1)
+                ent_s.append(-(ls.exp() * ls).sum(1)); ent_t.append(-(lt.exp() * lt).sum(1))
+                top_s.append(ls.exp().max(1).values); top_t.append(lt.exp().max(1).values)
+    return torch.stack(probs, 1), torch.stack(ent_s, 1), torch.stack(ent_t, 1), torch.stack(top_s, 1), torch.stack(top_t, 1)
+SL = np.cumsum((0,) + spec.HEAD_SIZES)
+def tv(a, b):
+    return [float(0.5 * (a[..., SL[k]:SL[k + 1]] - b[..., SL[k]:SL[k + 1]]).abs().sum(-1).mean()) for k in range(len(spec.HEAD_SIZES))]
+rng = np.random.default_rng(0)
+NM = math.ceil(T / spec.MANAGER_PERIOD)
+base_s = rng.integers(0, spec.NUM_SUBGOALS, (E, NM)); base_t = rng.integers(0, 4096, (E, NM))
+alts = [(rng.integers(0, spec.NUM_SUBGOALS, (E, NM)), rng.integers(0, 4096, (E, NM))) for _ in range(8)]
+print(f"probe: {E} episodes x {T} steps; max entropy: sub-goal ln 8 = {math.log(8):.3f}, target ln 4096 = {math.log(4096):.3f}")
+nets = {}
+for name, path in CK.items():
+    c = torch.load(path, map_location="cpu", weights_only=False)
+    nets[name] = net_of(c["model"], c["policy_config"])
+    _, es, et, ts, tt = run(nets[name], sample=False)
+    print(f"(a) {name:30s} it {c.get('iteration')} steps {c.get('env_steps')}: sub-goal entropy {es.mean():.3f} (top p {ts.mean():.3f}) | target entropy {et.mean():.3f} (top p {tt.mean():.4f})")
+print("(b) mean total-variation distance per head when the manager's forced choices are swapped (8 random alternatives vs one base)")
+print(f"    {'':30} {'changed':16} " + " ".join(f"{h:>7}" for h in spec.HEAD_NAMES))
+for name, net in nets.items():
+    base = run(net, base_s, base_t)[0]
+    for what in ("sub-goal+target", "sub-goal only", "target only"):
+        acc = []
+        for s, t in alts:
+            alt = run(net, s if "sub-goal" in what else base_s, t if "target" in what else base_t)[0]
+            acc.append(tv(base, alt))
+        print(f"    {name:30} {what:16} " + " ".join(f"{v:7.4f}" for v in np.mean(acc, 0)))

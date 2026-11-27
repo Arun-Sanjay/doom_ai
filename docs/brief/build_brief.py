@@ -3,6 +3,7 @@
     python docs/brief/build_brief.py            # writes brief.pdf, prints the page count
     python docs/brief/build_brief.py --html     # also keeps brief.html next to the PDF
     python docs/brief/build_brief.py --force    # writes the PDF even when it is too long, to look at it
+    python docs/brief/build_brief.py --strict   # also fails when a placeholder or a {{FINAL_...}} token is left
 
 Standard library only. The Markdown subset used by the brief (headings, paragraphs, bullet and
 numbered lists, pipe tables, fenced blocks, `code`, **bold**, *italic*, links) is converted to
@@ -10,8 +11,11 @@ HTML here, and a headless Chrome or Chromium prints the HTML to PDF. The browser
 the environment variable CHROME, then in the usual install places, then on PATH.
 
 Exit status: 0 when the PDF has at most MAX_PAGES pages, 1 when it has more or when the page count
-cannot be read (brief.pdf is then left as it was), 2 when no browser was found. The script also prints how many `[fill: ...]`
-placeholders the text still contains and an estimate of how full the last page is.
+cannot be read (brief.pdf is then left as it was), 2 when no browser was found. The script also prints
+how many `[fill: ...]` placeholders and `{{FINAL_...}}` tokens the text still contains (both are
+highlighted in the PDF) and an estimate of how full the pages are. The tokens stand for the numbers of
+the final agent and are replaced by `docs/brief/fill_final.py`; with `--strict` a brief that still
+holds one is an error (exit status 1), which is what the last build before the submission should use.
 """
 
 from __future__ import annotations
@@ -63,6 +67,7 @@ th, td {{ border: 0.5pt solid #999; padding: 1.1pt 3pt; text-align: left; vertic
 th {{ background: #e9e9e4; }}
 a {{ color: inherit; text-decoration: none; }}
 .fill {{ background: #fff3a8; }}
+.token {{ background: #ffd9a8; font-size: 6.2pt; word-break: break-all; }}
 """
 
 # Measures the laid-out height at the printable width, for the fill estimate (screen layout, so
@@ -74,13 +79,14 @@ MEASURE = """
 """
 
 FILL = re.compile(r"\[fill:[^\]]*\]")
+TOKEN = re.compile(r"\{\{FINAL_[A-Z0-9_]+\}\}")   # replaced by docs/brief/fill_final.py
 
 
 # ---------------------------------------------------------------------------------------------
 # Markdown subset -> HTML
 # ---------------------------------------------------------------------------------------------
 def inline(text: str) -> str:
-    """Inline markup of one piece of text: `code`, **bold**, *italic*, [text](url), [fill: ...]."""
+    """Inline markup of one piece of text: `code`, **bold**, *italic*, [text](url), [fill: ...], {{FINAL_...}}."""
     spans: list[str] = []
 
     def keep(match: re.Match) -> str:              # code spans are set aside so that bold may contain them
@@ -92,6 +98,7 @@ def inline(text: str) -> str:
     s = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", s)
     s = re.sub(r"(?<![*\w])\*([^*\s][^*]*)\*(?![*\w])", r"<em>\1</em>", s)
     s = FILL.sub(lambda m: '<span class="fill">' + m.group(0) + "</span>", s)
+    s = TOKEN.sub(lambda m: '<span class="token">' + m.group(0) + "</span>", s)
     return re.sub(r"\x00(\d+)\x00", lambda m: spans[int(m.group(1))], s)
 
 
@@ -232,6 +239,7 @@ def main() -> int:
     ap.add_argument("--out", default=str(TARGET))
     ap.add_argument("--html", action="store_true", help="keep the intermediate HTML next to the PDF")
     ap.add_argument("--force", action="store_true", help="write the PDF even when it is over the page limit")
+    ap.add_argument("--strict", action="store_true", help="fail when a placeholder or a {{FINAL_...}} token is left in the text")
     args = ap.parse_args()
 
     source, target = Path(args.source), Path(args.out)
@@ -262,16 +270,22 @@ def main() -> int:
         fill = fill_estimate(chrome, profile, markdown, work)
 
     placeholders = FILL.findall(markdown)
+    tokens = TOKEN.findall(markdown)
     written = "" if fits or args.force else " (not written; --force writes it anyway)"
     print(f"{target}: {pages if pages is not None else 'unknown number of'} page(s), {len(data) / 1024:.0f} KB{written}")
     if fill is not None:
         print(f"text height at the printable width: {fill:.2f} pages of {MAX_PAGES} (estimate)")
-    print(f"placeholders left: {len(placeholders)}")
+    print(f"placeholders left: {len(placeholders)}; final-agent tokens left: {len(tokens)}"
+          + (f" ({', '.join(sorted(set(tokens)))})" if tokens else ""))
     if pages is None:
         print("FAILED: could not read the page count from the PDF", file=sys.stderr)
         return 1
     if pages > MAX_PAGES:
         print(f"FAILED: {pages} pages, the limit is {MAX_PAGES}", file=sys.stderr)
+        return 1
+    if args.strict and (placeholders or tokens):
+        print(f"FAILED (--strict): {len(placeholders)} placeholder(s) and {len(tokens)} token(s) left in {source.name}",
+              file=sys.stderr)
         return 1
     return 0
 

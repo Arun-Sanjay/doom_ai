@@ -1,0 +1,28 @@
+Fresh-clone validation of the submission, 2026-11-27 04:31 to 04:39 IST
+======================================================================
+
+What was checked: a new `git clone` of the GitHub repository's default branch at commit 0bf38b2 (weights
+through Git LFS: policy.pt sha256 e2a54cd164bf, exit_detector.pt sha256 8985406ed0a6), in an empty folder
+on the development Mac (Apple M5 Pro), with its own environment created by uv in that folder. Both runs
+are the official validator, unchanged.
+
+1. `python validate.py` (macOS arm64, native)
+   PASSED. Episode on maps/two_rooms.wad: exit reached in 46 steps. Step latency p50 1.1 ms.
+
+2. `python validate.py --docker --no-gpu` (locally built official image `devforge-doom`, linux/arm64;
+   the validator pins the agent to one CPU, no network, read-only file system, as in the evaluation sandbox)
+
+   requirements.txt: no extra packages
+   DoomAgent interface: __init__, reset, act
+   CPU limit: agent pinned to 1 CPU (core 14), like the evaluation sandbox
+   Initialization: 1.7s (limit 60s) on device 'cpu'
+   Episode on '0_two_rooms.wad:MAP01': 46 steps, exit reached, agent time 0.1s of 21.0s budget, 0.2s wall-clock
+   Step latency '0_two_rooms.wad:MAP01': first 7 ms, p50 2.4 ms, p99 6.5 ms, max 7 ms
+   Peak RAM: 794 MB resident (limit 8192 MB, including files written to /tmp)
+   Repository size (tracked files): 11.4 MB of 1.0 GB
+   PASSED
+
+The lines under 2 are the validator's own output with the terminal colour codes removed. The native run's
+output was not kept as a file; its two numbers are from the run record written at the time.
+The architecture and the agent code are the same for every checkpoint, so the cost per decision does not
+depend on which policy file is shipped.
