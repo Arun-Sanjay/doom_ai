@@ -1,6 +1,6 @@
 # DoomNet: a neural DOOM agent with a self-built spatial memory
 
-Yugaantar 2026, DevForge Track 1 "Can It Play DOOM?" · project brief · team Arun-Sanjay (solo entry) · https://github.com/Arun-Sanjay/doom_ai
+Yugaantar 2026, DevForge Track 1 "Can It Play DOOM?" · project brief · team Team 1 · https://github.com/Arun-Sanjay/doom_ai
 
 ## USP
 

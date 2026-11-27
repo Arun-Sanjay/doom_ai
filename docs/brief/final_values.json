@@ -3,7 +3,7 @@
   "_dev_tag": "main_0525_M",
   "_report": "runs/final/report_shipped_main_0305_vs_shipped_main_0305_M_vs_main_0525_M.txt (main_0525_M)",
   "_policy_file": "policy.pt: source main_0525.pt, iteration 1750, env_steps 172032000, greedy_heads ['move', 'strafe', 'turn', 'use', 'weapon']",
-  "FINAL_TEAM_NAME": "Arun-Sanjay (solo entry)",
+  "FINAL_TEAM_NAME": "Team 1",
   "FINAL_AGENT": "main_0525_M",
   "FINAL_PICKED_AT": "5:37 AM",
   "FINAL_POLICY_SHA": "3f90be8826ef",
