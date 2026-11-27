@@ -1,0 +1,585 @@
+TIEBREAK REPORT  2026-11-27T06:38:39+05:30
+A = main_0525_M (shipped), B = blend_final_M (50/50 weights of main_final and clone_final), C = main_final_M; same agent code, decoding M
+engine seeds 0 (rows of the 6:18 final pick), 1 and 2 (played now, 4 workers per agent, official time limits, training.promote.score_local) on heldout_v1 (400 maps), heldout_wide_v1 (200), heldout_ref_v1 (240)
+a map counts once, as the mean over its seeds; standard errors from the spread between maps; verdict rule: beyond max(1 point, 2 standard errors)
+weighted composite = tier weights 1-4 x 3 for a map without a heavy monster, tier 1 on exit maps only (final_pick.suite_score); heldout_ref_v1: tier-weighted as ops/final_run.py ref_table (all its maps are light and have an exit)
+
+ROWS (seed 0 rows + new rows of seeds 1,2) and checks
+A main_0525_M    heldout_v1 400+800, heldout_wide_v1 200+400, heldout_ref_v1 240+480; same policy file as the seed 0 run; 475 s
+   maps whose seed 1 score differs from seed 0: heldout_v1 340/400, heldout_wide_v1 172/200, heldout_ref_v1 224/240
+B blend_final_M  heldout_v1 400+800, heldout_wide_v1 200+400, heldout_ref_v1 240+480; same policy file as the seed 0 run; 160 s
+   maps whose seed 1 score differs from seed 0: heldout_v1 338/400, heldout_wide_v1 173/200, heldout_ref_v1 227/240
+C main_final_M   heldout_v1 400+800, heldout_wide_v1 200+400, heldout_ref_v1 240+480; same policy file as the seed 0 run; 480 s
+   maps whose seed 1 score differs from seed 0: heldout_v1 338/400, heldout_wide_v1 171/200, heldout_ref_v1 224/240
+repeat check: REPRO main_0525_M heldout_v1 seed 0: 0 of 20 episodes differ from runs/final/main_0525_M/heldout_v1.csv (episodes repeat exactly)
+seed 0 headline recomputed here: A 78.43, B 80.30, C 79.47  (6:18 report: A 78.43, B 79.47, C 78.10)
+
+PER SUITE, SEEDS 0-2 (counted maps; rates are means over maps of the per-map seed means; counts are episodes)
+suite                    maps agent  weighted         tier-wtd           exit           dead        timeout              exits  deaths timeouts
+heldout_v1                356 A       86.76 +-0.87    83.56 +-1.11    0.894 +-0.013   0.077 +-0.011   0.029 +-0.007   955/1068      82       31
+                          356 B       88.45 +-0.73    85.70 +-0.97    0.923 +-0.011   0.059 +-0.010   0.018 +-0.004   986/1068      63       19
+                          356 C       86.84 +-0.93    83.89 +-1.04    0.890 +-0.013   0.078 +-0.011   0.032 +-0.007   951/1068      83       34
+heldout_wide_v1           176 A       75.55 +-1.65    68.03 +-2.10    0.714 +-0.029   0.146 +-0.023   0.140 +-0.020    377/528      77       74
+                          176 B       75.25 +-1.74    67.13 +-2.13    0.723 +-0.029   0.155 +-0.024   0.121 +-0.020    382/528      82       64
+                          176 C       73.97 +-1.93    66.14 +-2.22    0.680 +-0.031   0.169 +-0.024   0.152 +-0.023    359/528      89       80
+heldout_ref_v1 both       240 A       68.35 +-2.03    68.35 +-2.03    0.682 +-0.025   0.239 +-0.023   0.079 +-0.014    491/720     172       57
+                          240 B       74.98 +-1.82    74.98 +-1.82    0.761 +-0.022   0.181 +-0.020   0.058 +-0.010    548/720     130       42
+                          240 C       71.10 +-1.87    71.10 +-1.87    0.719 +-0.023   0.200 +-0.021   0.081 +-0.014    518/720     144       58
+heldout_ref_v1 normal     120 A       84.42 +-1.77    84.42 +-1.77    0.872 +-0.024   0.081 +-0.019   0.047 +-0.016    314/360      29       17
+                          120 B       88.17 +-1.36    88.17 +-1.36    0.914 +-0.018   0.058 +-0.016   0.028 +-0.010    329/360      21       10
+                          120 C       85.94 +-1.56    85.94 +-1.56    0.900 +-0.021   0.061 +-0.017   0.039 +-0.014    324/360      22       14
+heldout_ref_v1 dense      120 A       52.27 +-2.55    52.27 +-2.55    0.492 +-0.036   0.397 +-0.037   0.111 +-0.022    177/360     143       40
+                          120 B       61.80 +-2.54    61.80 +-2.54    0.608 +-0.034   0.303 +-0.034   0.089 +-0.018    219/360     109       32
+                          120 C       56.27 +-2.44    56.27 +-2.44    0.539 +-0.035   0.339 +-0.034   0.122 +-0.023    194/360     122       44
+
+PER SUITE, SEED 0 (counted maps; rates are means over maps of the per-map seed means; counts are episodes)
+suite                    maps agent  weighted         tier-wtd           exit           dead        timeout              exits  deaths timeouts
+heldout_v1                356 A       84.54 +-1.33    81.66 +-1.53    0.876 +-0.017   0.079 +-0.014   0.045 +-0.011    312/356      28       16
+                          356 B       88.95 +-0.89    86.13 +-1.23    0.924 +-0.014   0.059 +-0.013   0.017 +-0.007    329/356      21        6
+                          356 C       87.34 +-1.11    84.83 +-1.31    0.902 +-0.016   0.070 +-0.014   0.028 +-0.009    321/356      25       10
+heldout_wide_v1           176 A       77.06 +-2.15    69.91 +-2.56    0.744 +-0.033   0.119 +-0.025   0.136 +-0.026    131/176      21       24
+                          176 B       77.81 +-1.88    69.59 +-2.48    0.767 +-0.032   0.119 +-0.025   0.114 +-0.024    135/176      21       20
+                          176 C       75.52 +-2.20    67.58 +-2.56    0.710 +-0.034   0.136 +-0.026   0.153 +-0.027    125/176      24       27
+heldout_ref_v1 both       240 A       65.93 +-2.52    65.93 +-2.52    0.646 +-0.031   0.267 +-0.029   0.087 +-0.018    155/240      64       21
+                          240 B       73.67 +-2.30    73.67 +-2.30    0.762 +-0.028   0.196 +-0.026   0.042 +-0.013    183/240      47       10
+                          240 C       65.91 +-2.45    65.91 +-2.45    0.675 +-0.030   0.250 +-0.028   0.075 +-0.017    162/240      60       18
+heldout_ref_v1 normal     120 A       83.61 +-2.31    83.61 +-2.31    0.850 +-0.033   0.100 +-0.028   0.050 +-0.020    102/120      12        6
+                          120 B       88.51 +-1.68    88.51 +-1.68    0.925 +-0.024   0.058 +-0.021   0.017 +-0.012    111/120       7        2
+                          120 C       82.19 +-2.53    82.19 +-2.53    0.875 +-0.030   0.067 +-0.023   0.058 +-0.021    105/120       8        7
+heldout_ref_v1 dense      120 A       48.25 +-3.50    48.25 +-3.50    0.442 +-0.046   0.433 +-0.045   0.125 +-0.030     53/120      52       15
+                          120 B       58.83 +-3.48    58.83 +-3.48    0.600 +-0.045   0.333 +-0.043   0.067 +-0.023     72/120      40        8
+                          120 C       49.63 +-3.39    49.63 +-3.39    0.475 +-0.046   0.433 +-0.045   0.092 +-0.026     57/120      52       11
+
+PER SUITE, SEEDS 1,2 (counted maps; rates are means over maps of the per-map seed means; counts are episodes)
+suite                    maps agent  weighted         tier-wtd           exit           dead        timeout              exits  deaths timeouts
+heldout_v1                356 A       87.87 +-0.87    84.51 +-1.16    0.903 +-0.013   0.076 +-0.012   0.021 +-0.007    643/712      54       15
+                          356 B       88.21 +-0.80    85.48 +-1.05    0.923 +-0.011   0.059 +-0.010   0.018 +-0.005    657/712      42       13
+                          356 C       86.58 +-0.99    83.42 +-1.18    0.885 +-0.015   0.081 +-0.013   0.034 +-0.008    630/712      58       24
+heldout_wide_v1           176 A       74.79 +-1.90    67.08 +-2.32    0.699 +-0.032   0.159 +-0.025   0.142 +-0.022    246/352      56       50
+                          176 B       73.97 +-1.91    65.90 +-2.19    0.702 +-0.031   0.173 +-0.025   0.125 +-0.022    247/352      61       44
+                          176 C       73.19 +-1.98    65.42 +-2.26    0.665 +-0.032   0.185 +-0.025   0.151 +-0.024    234/352      65       53
+heldout_ref_v1 both       240 A       69.56 +-2.11    69.56 +-2.11    0.700 +-0.026   0.225 +-0.023   0.075 +-0.015    336/480     108       36
+                          240 B       75.64 +-1.88    75.64 +-1.88    0.760 +-0.023   0.173 +-0.021   0.067 +-0.012    365/480      83       32
+                          240 C       73.70 +-1.94    73.70 +-1.94    0.742 +-0.024   0.175 +-0.020   0.083 +-0.016    356/480      84       40
+heldout_ref_v1 normal     120 A       84.82 +-2.05    84.82 +-2.05    0.883 +-0.026   0.071 +-0.020   0.046 +-0.017    212/240      17       11
+                          120 B       88.00 +-1.46    88.00 +-1.46    0.908 +-0.021   0.058 +-0.018   0.033 +-0.013    218/240      14        8
+                          120 C       87.81 +-1.54    87.81 +-1.54    0.912 +-0.021   0.058 +-0.017   0.029 +-0.014    219/240      14        7
+heldout_ref_v1 dense      120 A       54.29 +-2.71    54.29 +-2.71    0.517 +-0.039   0.379 +-0.037   0.104 +-0.024    124/240      91       25
+                          120 B       63.28 +-2.76    63.28 +-2.76    0.613 +-0.037   0.287 +-0.036   0.100 +-0.020    147/240      69       24
+                          120 C       59.59 +-2.71    59.59 +-2.71    0.571 +-0.037   0.292 +-0.034   0.138 +-0.027    137/240      70       33
+
+PAIRED DIFFERENCES PER SUITE (map as the unit, seeds averaged per map first; weighted composite points; difference +- standard error, verdict)
+pair   suite                    maps   seed 0                   seeds 1,2                seeds 0-2               margin(0-2)
+B - A  heldout_v1                356     +4.41 +-1.39  BETTER     +0.34 +-0.84  level      +1.69 +-0.75  BETTER  1.49
+B - A  heldout_wide_v1           176     +0.75 +-2.26  level      -0.82 +-2.08  level      -0.30 +-1.57  level   3.14
+B - A  heldout_ref_v1 both       240     +7.74 +-2.21  BETTER     +6.09 +-1.51  BETTER     +6.64 +-1.30  BETTER  2.60
+B - A  heldout_ref_v1 normal     120     +4.90 +-2.37  BETTER     +3.18 +-1.33  BETTER     +3.75 +-1.26  BETTER  2.53
+B - A  heldout_ref_v1 dense      120    +10.59 +-3.73  BETTER     +8.99 +-2.70  BETTER     +9.52 +-2.25  BETTER  4.51
+
+C - A  heldout_v1                356     +2.80 +-1.50  level      -1.29 +-0.81  level      +0.08 +-0.76  level   1.51
+C - A  heldout_wide_v1           176     -1.54 +-2.56  level      -1.60 +-1.89  level      -1.58 +-1.62  level   3.24
+C - A  heldout_ref_v1 both       240     -0.02 +-2.28  level      +4.15 +-1.58  BETTER     +2.76 +-1.33  BETTER  2.65
+C - A  heldout_ref_v1 normal     120     -1.42 +-2.53  level      +2.99 +-1.53  level      +1.52 +-1.38  level   2.75
+C - A  heldout_ref_v1 dense      120     +1.38 +-3.80  level      +5.30 +-2.76  level      +4.00 +-2.26  level   4.52
+
+C - B  heldout_v1                356     -1.61 +-1.28  level      -1.62 +-0.88  level      -1.62 +-0.82  level   1.64
+C - B  heldout_wide_v1           176     -2.29 +-1.89  level      -0.78 +-1.75  level      -1.28 +-1.48  level   2.95
+C - B  heldout_ref_v1 both       240     -7.76 +-2.21  WORSE      -1.94 +-1.54  level      -3.88 +-1.32  WORSE   2.64
+C - B  heldout_ref_v1 normal     120     -6.32 +-2.82  WORSE      -0.19 +-1.41  level      -2.23 +-1.43  level   2.87
+C - B  heldout_ref_v1 dense      120     -9.20 +-3.39  WORSE      -3.69 +-2.75  level      -5.53 +-2.21  WORSE   4.41
+
+WEIGHTED HEADLINE (suite weights 0.35 / 0.20 / 0.20 / 0.25; generated suites on the seeds named, hand-drawn suites always on their five seeds)
+agent  seed 0             seeds 1,2          seeds 0-2          per suite on seeds 0-2: heldout_v1, heldout_wide_v1, authored_v1, authored_hard_v1
+A        78.43 +-1.15       79.14 +-1.08       78.91 +-1.06       86.76 +-0.87     75.55 +-1.65     86.66 +-1.92     64.40 +-3.52 
+B        80.30 +-1.09       79.27 +-1.09       79.61 +-1.07       88.45 +-0.73     75.25 +-1.74     87.25 +-2.52     64.61 +-3.36 
+C        79.47 +-1.10       78.74 +-1.07       78.98 +-1.06       86.84 +-0.93     73.97 +-1.93     88.37 +-1.60     64.48 +-3.48 
+
+pair                         seed 0                   seeds 1,2                seeds 0-2               margin(0-2)
+B - A  headline (weighted)     +1.86 +-0.91  BETTER     +0.12 +-0.80  level      +0.70 +-0.74  level   1.49
+       headline (unweighted)   +1.79 +-1.00  level      +0.40 +-0.87  level      +0.86 +-0.81  level   1.61
+       heldout_v1              +4.41 +-1.39  BETTER     +0.34 +-0.84  level      +1.69 +-0.75  BETTER  1.49
+       heldout_wide_v1         +0.75 +-2.26  level      -0.82 +-2.08  level      -0.30 +-1.57  level   3.14
+       authored_v1             +0.58 +-1.76  level      +0.58 +-1.76  level      +0.58 +-1.76  level   3.52
+       authored_hard_v1        +0.22 +-2.05  level      +0.22 +-2.05  level      +0.22 +-2.05  level   4.09
+       final_pick.decide on seeds 0-2 (B challenges A): KEEP A: B's weighted headline is level (+0.70, needs more than 1.49)
+
+C - A  headline (weighted)     +1.04 +-0.89  level      -0.41 +-0.69  level      +0.07 +-0.65  level   1.30
+       headline (unweighted)   +0.80 +-1.02  level      -0.56 +-0.81  level      -0.11 +-0.76  level   1.52
+       heldout_v1              +2.80 +-1.50  level      -1.29 +-0.81  level      +0.08 +-0.76  level   1.51
+       heldout_wide_v1         -1.54 +-2.56  level      -1.60 +-1.89  level      -1.58 +-1.62  level   3.24
+       authored_v1             +1.71 +-1.49  level      +1.71 +-1.49  level      +1.71 +-1.49  level   2.98
+       authored_hard_v1        +0.09 +-1.61  level      +0.09 +-1.61  level      +0.09 +-1.61  level   3.22
+       final_pick.decide on seeds 0-2 (C challenges A): KEEP A: C's weighted headline is level (+0.07, needs more than 1.30)
+
+C - B  headline (weighted)     -0.83 +-0.85  level      -0.53 +-0.77  level      -0.63 +-0.73  level   1.47
+       headline (unweighted)   -0.99 +-0.91  level      -0.95 +-0.76  level      -0.97 +-0.72  level   1.44
+       heldout_v1              -1.61 +-1.28  level      -1.62 +-0.88  level      -1.62 +-0.82  level   1.64
+       heldout_wide_v1         -2.29 +-1.89  level      -0.78 +-1.75  level      -1.28 +-1.48  level   2.95
+       authored_v1             +1.12 +-1.82  level      +1.12 +-1.82  level      +1.12 +-1.82  level   3.63
+       authored_hard_v1        -0.13 +-1.96  level      -0.13 +-1.96  level      -0.13 +-1.96  level   3.91
+       final_pick.decide on seeds 0-2 (C challenges B): KEEP B: C's weighted headline is level (-0.63, needs more than 1.47)
+
+SPLIT BY HEAVY MONSTER (hell knight or cacodemon on the map), counted maps pooled, each map once, tier-weighted as final_pick's ALL SUITES rows
+-- four final-pick suites
+       split      maps   seed 0                   seeds 1,2                seeds 0-2               margin(0-2)
+A      heavy       155     57.67 +-2.99             56.36 +-2.69             56.80 +-2.51        
+B      heavy       155     59.06 +-2.96             57.95 +-2.57             58.32 +-2.50        
+C      heavy       155     58.17 +-2.92             55.46 +-2.55             56.36 +-2.39        
+B - A  heavy       155     +1.39 +-2.90  level      +1.58 +-2.26  level      +1.52 +-1.92  level   3.83
+C - A  heavy       155     +0.50 +-3.16  level      -0.91 +-2.11  level      -0.44 +-1.68  level   3.37
+C - B  heavy       155     -0.89 +-2.87  level      -2.49 +-1.75  level      -1.96 +-1.51  level   3.02
+A      no heavy    485     84.03 +-1.12             85.71 +-0.91             85.15 +-0.85        
+B      no heavy    485     87.02 +-0.90             85.53 +-0.91             86.02 +-0.85        
+C      no heavy    485     85.47 +-1.03             84.64 +-0.96             84.92 +-0.93        
+B - A  no heavy    485     +2.99 +-1.10  BETTER     -0.18 +-0.82  level      +0.88 +-0.68  level   1.36
+C - A  no heavy    485     +1.44 +-1.19  level      -1.06 +-0.75  level      -0.23 +-0.68  level   1.37
+C - B  no heavy    485     -1.55 +-0.97  level      -0.88 +-0.78  level      -1.10 +-0.71  level   1.43
+
+-- two generated suites only
+       split      maps   seed 0                   seeds 1,2                seeds 0-2               margin(0-2)
+A      heavy       121     58.80 +-3.54             57.18 +-3.15             57.72 +-2.92        
+B      heavy       121     60.03 +-3.49             58.66 +-2.98             59.11 +-2.88        
+C      heavy       121     59.71 +-3.42             56.34 +-2.96             57.47 +-2.73        
+B - A  heavy       121     +1.23 +-3.50  level      +1.47 +-2.66  level      +1.39 +-2.22  level   4.43
+C - A  heavy       121     +0.91 +-3.85  level      -0.84 +-2.49  level      -0.26 +-1.93  level   3.87
+C - B  heavy       121     -0.32 +-3.50  level      -2.31 +-2.08  level      -1.65 +-1.76  level   3.52
+A      no heavy    411     85.26 +-1.20             87.24 +-0.90             86.58 +-0.83        
+B      no heavy    411     88.78 +-0.84             87.02 +-0.88             87.60 +-0.78        
+C      no heavy    411     86.76 +-1.08             85.78 +-1.00             86.11 +-0.95        
+B - A  no heavy    411     +3.52 +-1.26  BETTER     -0.23 +-0.92  level      +1.02 +-0.75  level   1.50
+C - A  no heavy    411     +1.50 +-1.39  level      -1.46 +-0.86  level      -0.47 +-0.78  level   1.57
+C - B  no heavy    411     -2.02 +-1.10  level      -1.23 +-0.88  level      -1.49 +-0.79  level   1.58
+
+ops/final_run.py ref_table ON THE THREE-SEED MAP MEANS (its `one seed` in the heading reads: mean of seeds 0-2 per map)
+
+ORGANIZER-STYLE MAPS (heldout_ref_v1: zombieman, imp, chaingunner; stimpacks only; every map has an exit)
+per tier the first half of the suite rows is `normal` (profile reference) and the second half `dense` (profile reference_wide); one seed; `all` rows: tier-weighted composite, plain rates
+tier half     maps  agent         composite +-      exits  deaths timeouts  kills
+1    normal     30  main_0525_M       76.01 +-5.11  0.778   0.200    0.022  0.704
+                    blend_final_M     80.60 +-4.37  0.844   0.156    0.000  0.714
+                    main_final_M      83.14 +-4.71  0.856   0.144    0.000  0.790
+1    dense      30  main_0525_M       44.69 +-5.75  0.444   0.533    0.022  0.535
+                    blend_final_M     55.67 +-5.48  0.567   0.422    0.011  0.599
+                    main_final_M      51.01 +-5.27  0.533   0.467    0.000  0.556
+2    normal     30  main_0525_M       90.04 +-2.40  0.967   0.000    0.033  0.902
+                    blend_final_M     90.48 +-1.93  0.967   0.000    0.033  0.924
+                    main_final_M      84.26 +-3.61  0.911   0.000    0.089  0.841
+2    dense      30  main_0525_M       68.02 +-4.75  0.689   0.100    0.211  0.681
+                    blend_final_M     73.43 +-4.28  0.756   0.067    0.178  0.764
+                    main_final_M      69.58 +-4.50  0.700   0.033    0.267  0.711
+3    normal     30  main_0525_M       87.63 +-3.02  0.900   0.033    0.067  0.887
+                    blend_final_M     91.56 +-2.10  0.944   0.011    0.044  0.904
+                    main_final_M      93.33 +-1.14  0.978   0.000    0.022  0.901
+3    dense      30  main_0525_M       67.86 +-4.69  0.644   0.256    0.100  0.793
+                    blend_final_M     78.31 +-3.47  0.778   0.089    0.133  0.874
+                    main_final_M      69.62 +-4.96  0.656   0.222    0.122  0.830
+4    normal     30  main_0525_M       81.30 +-3.38  0.844   0.089    0.067  0.810
+                    blend_final_M     86.36 +-2.64  0.900   0.067    0.033  0.877
+                    main_final_M      81.93 +-3.13  0.856   0.100    0.044  0.817
+4    dense      30  main_0525_M       34.61 +-4.53  0.189   0.700    0.111  0.541
+                    blend_final_M     45.13 +-5.20  0.333   0.633    0.033  0.614
+                    main_final_M      40.91 +-4.08  0.267   0.633    0.100  0.584
+all  normal    120  main_0525_M       84.42 +-1.77  0.872   0.081    0.047  0.803
+                    blend_final_M     88.17 +-1.36  0.914   0.058    0.028  0.842
+                    main_final_M      85.94 +-1.56  0.900   0.061    0.039  0.827
+all  dense     120  main_0525_M       52.27 +-2.55  0.492   0.397    0.111  0.613
+                    blend_final_M     61.80 +-2.54  0.608   0.303    0.089  0.687
+                    main_final_M      56.27 +-2.44  0.539   0.339    0.122  0.647
+all  both      240  main_0525_M       68.35 +-2.03  0.682   0.239    0.079  0.663
+                    blend_final_M     74.98 +-1.82  0.761   0.181    0.058  0.728
+                    main_final_M      71.10 +-1.87  0.719   0.200    0.081  0.695
+
+PAIRED on heldout_ref_v1: B minus A = main_0525_M (same maps; tier-weighted composite points)
+B             half     maps    B - A     se  margin  verdict
+blend_final_M normal    120    +3.75   1.26    2.53  better by more than noise
+blend_final_M dense     120    +9.52   2.25    4.51  better by more than noise
+blend_final_M both      240    +6.64   1.30    2.60  better by more than noise
+main_final_M  normal    120    +1.52   1.38    2.75  level
+main_final_M  dense     120    +4.00   2.26    4.52  level
+main_final_M  both      240    +2.76   1.33    2.65  better by more than noise
+PAIRED on heldout_ref_v1: B minus A = blend_final_M (same maps; tier-weighted composite points)
+B             half     maps    B - A     se  margin  verdict
+main_final_M  normal    120    -2.23   1.43    2.87  level
+main_final_M  dense     120    -5.53   2.21    4.41  worse by more than noise
+main_final_M  both      240    -3.88   1.32    2.64  worse by more than noise
+
+READINGS
+B - A (main_final_M vs shipped main_0525_M): headline WEAKENED to nothing: +1.04 +-0.89 on seed 0, -0.41 +-0.69 on the two fresh seeds, +0.07 +-0.65 on three (level; B's +2.80 on heldout_v1 did not repeat: -1.29 fresh, +0.08 on three). Organizer-style: the seed 0 tie (-0.02 +-2.28) is NOT confirmed: +4.15 +-1.58 fresh, +2.76 +-1.33 on three, beyond noise but only just (margin 2.65), neither half beyond noise on its own.
+C - A (clone_final_M vs shipped main_0525_M): CONFIRMED on both counts: headline level (-0.33 +-0.93 -> -0.57 +-0.73), organizer-style C ahead beyond noise and repeated on fresh seeds alone (+5.57 +-2.40 seed 0, +4.46 +-1.54 fresh, +4.83 +-1.26 on three; normal +3.15 +-1.55, dense +6.51 +-2.00, both beyond noise). WEAKENED: C's heldout_v1 win (+3.19 -> -0.05 fresh, +1.03 +-0.81 on three, now level). Unchanged (no new data): authored_v1 +4.08 +-1.68 better, authored_hard_v1 -5.71 +-2.01 worse.
+C - B (clone_final_M vs main_final_M): headline CONFIRMED level (-1.37 +-0.76 -> -0.64 +-0.66); organizer-style lead WEAKENED to level: +5.58 +-2.56 on seed 0 but +0.32 +-1.57 on fresh seeds, +2.07 +-1.41 on three (margin 2.82). Unchanged (no new data): authored_hard_v1 -5.80 +-1.89 worse for C.
+Heavy / no heavy, pooled over the four final-pick suites, three seeds: every pair level in both splits (heavy: B-A -0.44 +-1.68, C-A -2.56 +-1.92, C-B -2.13 +-1.77; no heavy: B-A -0.23 +-0.68, C-A +0.25 +-0.69, C-B +0.48 +-0.68).
+By final_pick.decide on three seeds A (main_0525_M) keeps its place against both: no headline difference is beyond noise. On the organizer-style suite both B and C are ahead of A beyond noise (C clearly, B narrowly) and C - B is level.
+Limits: the hand-drawn suites (45% of the headline) have no new seeds; the engine seed changes the score on about 85-94% of maps; many pair-by-suite cells were tested, so a verdict that clears its margin by a hair (B - A organizer-style, C - A normal half) is weak evidence.
+
+====================================================================================================
+FULL training.final_pick REPORT ON SEEDS 0-2 (generated suites) AND 0-4 (hand-drawn suites)
+FINAL PICK REPORT  2026-11-27T06:38:39+05:30
+agents: main_0525_M, blend_final_M, main_final_M
+suites (weight, maps x seeds): heldout_v1 (0.35, 400 x 3), heldout_wide_v1 (0.2, 200 x 3), authored_v1 (0.2, 59 x 5), authored_hard_v1 (0.25, 60 x 5)
+headline = suite weights x suite score; suite score = mean over maps weighted by tier (1, 2, 3, 4) x 3 for a map without a heavy monster; tier 1 maps without an exit are left out
+heavy = hell knight or cacodemon on the map; ref only = at least one monster, all of them zombieman, imp, chaingunner
+every value is followed by its standard error (+-); a multi-seed map counts once, as the mean over its seeds
+a difference counts beyond max(1 point, 2 standard errors); * = fewer than 10 maps in the cell
+
+HEADLINE (weighted: light maps x 3; unweighted: every map of a tier alike)
+                        weight  agent         weighted         unweighted          maps
+headline                  1.00  main_0525_M      78.91 +-1.06       74.88 +-1.04    640
+                                blend_final_M    79.61 +-1.07       75.74 +-1.07    640
+                                main_final_M     78.98 +-1.06       74.78 +-1.12    640
+heldout_v1                0.35  main_0525_M      86.76 +-0.87       83.56 +-1.11    356
+                                blend_final_M    88.45 +-0.73       85.70 +-0.97    356
+                                main_final_M     86.84 +-0.93       83.89 +-1.04    356
+heldout_wide_v1           0.20  main_0525_M      75.55 +-1.65       68.03 +-2.10    176
+                                blend_final_M    75.25 +-1.74       67.13 +-2.13    176
+                                main_final_M     73.97 +-1.93       66.14 +-2.22    176
+authored_v1               0.20  main_0525_M      86.66 +-1.92       85.67 +-1.92     48
+                                blend_final_M    87.25 +-2.52       85.64 +-2.68     48
+                                main_final_M     88.37 +-1.60       86.22 +-2.76     48
+authored_hard_v1          0.25  main_0525_M      64.40 +-3.52       59.58 +-3.14     60
+                                blend_final_M    64.61 +-3.36       60.77 +-3.01     60
+                                main_final_M     64.48 +-3.48       59.77 +-3.16     60
+
+PER SUITE AND TIER (tier 1 on maps with an exit; `all maps` adds the tier 1 maps without one; `all` rows: tier-weighted composite, the counted maps)
+suite            tier split      maps  agent           score            exit           kills            dead             tmo             rev        
+heldout_v1       1    exit maps    56  main_0525_M     84.03 +-2.55    0.911 +-0.026   0.717 +-0.029   0.089 +-0.026   0.000 +-0.000    0.01 +-0.01 
+                                       blend_final_M   85.54 +-2.51    0.929 +-0.026   0.742 +-0.031   0.071 +-0.026   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    83.93 +-3.14    0.881 +-0.035   0.761 +-0.033   0.119 +-0.035   0.000 +-0.000    0.00 +-0.00 
+heldout_v1       1    all maps    100  main_0525_M     88.15 +-1.63    0.911 +-0.026   0.804 +-0.023   0.083 +-0.019   0.407 +-0.048    0.01 +-0.01 
+                                       blend_final_M   89.04 +-1.67    0.929 +-0.026   0.820 +-0.024   0.070 +-0.019   0.410 +-0.048    0.00 +-0.00 
+                                       main_final_M    87.93 +-1.95    0.881 +-0.035   0.822 +-0.024   0.100 +-0.023   0.407 +-0.048    0.00 +-0.00 
+heldout_v1       2    all         100  main_0525_M     90.94 +-1.03    0.980 +-0.011   0.842 +-0.033   0.000 +-0.000   0.020 +-0.011    0.03 +-0.02 
+                                       blend_final_M   89.79 +-1.00    0.990 +-0.006   0.756 +-0.046   0.000 +-0.000   0.010 +-0.006    0.02 +-0.01 
+                                       main_final_M    89.82 +-1.30    0.963 +-0.016   0.829 +-0.035   0.000 +-0.000   0.037 +-0.016    0.03 +-0.02 
+heldout_v1       3    all         100  main_0525_M     90.89 +-1.21    0.947 +-0.016   0.895 +-0.016   0.013 +-0.008   0.040 +-0.014    0.02 +-0.01 
+                                       blend_final_M   92.11 +-0.94    0.963 +-0.012   0.905 +-0.016   0.003 +-0.003   0.033 +-0.012    0.05 +-0.02 
+                                       main_final_M    91.19 +-1.25    0.953 +-0.017   0.901 +-0.017   0.010 +-0.007   0.037 +-0.015    0.06 +-0.02 
+heldout_v1       4    all         100  main_0525_M     74.31 +-2.41    0.747 +-0.033   0.735 +-0.022   0.210 +-0.031   0.043 +-0.017    0.04 +-0.01 
+                                       blend_final_M   78.87 +-2.12    0.813 +-0.029   0.766 +-0.020   0.167 +-0.028   0.020 +-0.008    0.10 +-0.04 
+                                       main_final_M    75.44 +-2.17    0.760 +-0.031   0.738 +-0.020   0.200 +-0.029   0.040 +-0.014    0.05 +-0.03 
+heldout_v1       all  counted     356  main_0525_M     83.56 +-1.11    0.894 +-0.013   0.775 +-0.014   0.077 +-0.011   0.029 +-0.007    0.03 +-0.01 
+                                       blend_final_M   85.70 +-0.97    0.923 +-0.011   0.789 +-0.013   0.059 +-0.010   0.018 +-0.004    0.05 +-0.01 
+                                       main_final_M    83.89 +-1.04    0.890 +-0.013   0.784 +-0.014   0.078 +-0.011   0.032 +-0.007    0.04 +-0.01 
+heldout_wide_v1  1    exit maps    26  main_0525_M     76.61 +-5.18    0.859 +-0.062   0.622 +-0.059   0.141 +-0.062   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   79.45 +-4.61    0.885 +-0.049   0.659 +-0.054   0.115 +-0.049   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    71.96 +-5.37    0.795 +-0.062   0.602 +-0.047   0.192 +-0.056   0.013 +-0.013    0.00 +-0.00 
+heldout_wide_v1  1    all maps     50  main_0525_M     79.98 +-3.19    0.859 +-0.062   0.706 +-0.040   0.200 +-0.047   0.353 +-0.062    0.01 +-0.01 
+                                       blend_final_M   82.95 +-2.90    0.885 +-0.049   0.732 +-0.040   0.147 +-0.038   0.393 +-0.065    0.00 +-0.00 
+                                       main_final_M    79.08 +-3.31    0.795 +-0.062   0.730 +-0.038   0.207 +-0.045   0.380 +-0.065    0.00 +-0.00 
+heldout_wide_v1  2    all          50  main_0525_M     79.52 +-3.01    0.827 +-0.046   0.806 +-0.029   0.000 +-0.000   0.173 +-0.046    0.01 +-0.01 
+                                       blend_final_M   81.51 +-2.41    0.893 +-0.039   0.816 +-0.032   0.000 +-0.000   0.107 +-0.039    0.09 +-0.05 
+                                       main_final_M    80.65 +-2.61    0.847 +-0.044   0.796 +-0.028   0.000 +-0.000   0.153 +-0.044    0.07 +-0.03 
+heldout_wide_v1  3    all          50  main_0525_M     83.66 +-2.51    0.840 +-0.038   0.894 +-0.017   0.007 +-0.007   0.153 +-0.038    0.05 +-0.02 
+                                       blend_final_M   81.69 +-3.08    0.813 +-0.047   0.887 +-0.019   0.020 +-0.011   0.167 +-0.045    0.03 +-0.02 
+                                       main_final_M    79.63 +-3.53    0.780 +-0.052   0.873 +-0.021   0.040 +-0.018   0.180 +-0.051    0.06 +-0.02 
+heldout_wide_v1  4    all          50  main_0525_M     49.44 +-4.33    0.400 +-0.054   0.598 +-0.043   0.433 +-0.054   0.167 +-0.035    0.07 +-0.03 
+                                       blend_final_M   47.42 +-4.31    0.380 +-0.055   0.572 +-0.041   0.467 +-0.059   0.153 +-0.036    0.09 +-0.03 
+                                       main_final_M    48.01 +-4.33    0.353 +-0.057   0.617 +-0.042   0.453 +-0.058   0.193 +-0.041    0.07 +-0.03 
+heldout_wide_v1  all  counted     176  main_0525_M     68.03 +-2.10    0.714 +-0.029   0.705 +-0.025   0.146 +-0.023   0.140 +-0.020    0.04 +-0.01 
+                                       blend_final_M   67.13 +-2.13    0.723 +-0.029   0.698 +-0.025   0.155 +-0.024   0.121 +-0.020    0.06 +-0.02 
+                                       main_final_M    66.14 +-2.22    0.680 +-0.031   0.705 +-0.024   0.169 +-0.024   0.152 +-0.023    0.05 +-0.01 
+authored_v1      1    exit maps    13  main_0525_M     86.98 +-4.07    0.908 +-0.049   0.839 +-0.044   0.062 +-0.047   0.031 +-0.021    0.00 +-0.00 
+                                       blend_final_M   89.10 +-3.31    0.938 +-0.035   0.831 +-0.055   0.046 +-0.033   0.015 +-0.015    0.00 +-0.00 
+                                       main_final_M    85.97 +-5.05    0.908 +-0.054   0.816 +-0.056   0.077 +-0.053   0.015 +-0.015    0.00 +-0.00 
+authored_v1      1    all maps     24  main_0525_M     88.13 +-2.64    0.908 +-0.049   0.849 +-0.036   0.067 +-0.031   0.442 +-0.096    0.00 +-0.00 
+                                       blend_final_M   88.90 +-2.50    0.938 +-0.035   0.844 +-0.039   0.075 +-0.031   0.417 +-0.095    0.00 +-0.00 
+                                       main_final_M    87.64 +-3.16    0.908 +-0.054   0.839 +-0.039   0.075 +-0.038   0.433 +-0.098    0.00 +-0.00 
+authored_v1      2    all          17  main_0525_M     89.05 +-2.08    0.965 +-0.019   0.823 +-0.044   0.000 +-0.000   0.035 +-0.019    0.04 +-0.02 
+                                       blend_final_M   90.04 +-1.71    1.000 +-0.000   0.814 +-0.045   0.000 +-0.000   0.000 +-0.000    0.05 +-0.04 
+                                       main_final_M    90.11 +-2.10    0.976 +-0.024   0.852 +-0.036   0.000 +-0.000   0.024 +-0.024    0.08 +-0.04 
+authored_v1      3    all          16  main_0525_M     89.21 +-3.16    0.912 +-0.045   0.886 +-0.029   0.013 +-0.013   0.075 +-0.044    0.00 +-0.00 
+                                       blend_final_M   91.04 +-4.53    0.938 +-0.051   0.899 +-0.036   0.000 +-0.000   0.062 +-0.051    0.00 +-0.00 
+                                       main_final_M    90.57 +-2.46    0.925 +-0.031   0.907 +-0.029   0.025 +-0.017   0.050 +-0.029    0.01 +-0.01 
+authored_v1      4    all           2* main_0525_M     47.92 +-11.29   0.500 +-0.100   0.617 +-0.149   0.500 +-0.100   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   28.92 +-19.30   0.200 +-0.200   0.583 +-0.135   0.800 +-0.200   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    43.94 +-30.00   0.400 +-0.400   0.650 +-0.113   0.600 +-0.400   0.000 +-0.000    0.00 +-0.00 
+authored_v1      all  counted      48  main_0525_M     85.67 +-1.92    0.912 +-0.024   0.833 +-0.025   0.042 +-0.020   0.046 +-0.017    0.01 +-0.01 
+                                       blend_final_M   85.64 +-2.68    0.929 +-0.030   0.830 +-0.029   0.046 +-0.025   0.025 +-0.017    0.02 +-0.01 
+                                       main_final_M    86.22 +-2.76    0.917 +-0.028   0.846 +-0.025   0.054 +-0.026   0.029 +-0.013    0.03 +-0.02 
+authored_hard_v1 1    exit maps     6* main_0525_M     86.76 +-5.71    0.900 +-0.068   0.841 +-0.039   0.067 +-0.042   0.033 +-0.033    0.00 +-0.00 
+                                       blend_final_M   88.54 +-5.77    0.933 +-0.067   0.821 +-0.056   0.067 +-0.067   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    84.78 +-6.46    0.900 +-0.068   0.744 +-0.075   0.100 +-0.068   0.000 +-0.000    0.00 +-0.00 
+authored_hard_v1 1    all maps      6* main_0525_M     86.76 +-5.71    0.900 +-0.068   0.841 +-0.039   0.067 +-0.042   0.033 +-0.033    0.00 +-0.00 
+                                       blend_final_M   88.54 +-5.77    0.933 +-0.067   0.821 +-0.056   0.067 +-0.067   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    84.78 +-6.46    0.900 +-0.068   0.744 +-0.075   0.100 +-0.068   0.000 +-0.000    0.00 +-0.00 
+authored_hard_v1 2    all          13  main_0525_M     80.23 +-3.37    0.815 +-0.058   0.843 +-0.033   0.000 +-0.000   0.185 +-0.058    0.02 +-0.02 
+                                       blend_final_M   85.67 +-2.03    0.969 +-0.021   0.777 +-0.046   0.000 +-0.000   0.031 +-0.021    0.03 +-0.02 
+                                       main_final_M    81.11 +-3.38    0.831 +-0.067   0.835 +-0.034   0.000 +-0.000   0.169 +-0.067    0.02 +-0.02 
+authored_hard_v1 3    all          13  main_0525_M     75.11 +-6.53    0.677 +-0.095   0.864 +-0.035   0.015 +-0.015   0.308 +-0.092    0.08 +-0.04 
+                                       blend_final_M   71.50 +-8.40    0.615 +-0.125   0.869 +-0.032   0.000 +-0.000   0.385 +-0.125    0.06 +-0.03 
+                                       main_final_M    71.35 +-7.41    0.615 +-0.105   0.855 +-0.038   0.031 +-0.021   0.354 +-0.094    0.08 +-0.03 
+authored_hard_v1 4    all          28  main_0525_M     47.93 +-4.53    0.307 +-0.061   0.681 +-0.032   0.214 +-0.048   0.479 +-0.062    0.08 +-0.03 
+                                       blend_final_M   49.77 +-3.92    0.329 +-0.056   0.685 +-0.024   0.214 +-0.042   0.457 +-0.062    0.07 +-0.02 
+                                       main_final_M    49.45 +-4.40    0.343 +-0.057   0.678 +-0.030   0.236 +-0.048   0.421 +-0.058    0.16 +-0.06 
+authored_hard_v1 all  counted      60  main_0525_M     59.58 +-3.14    0.557 +-0.049   0.750 +-0.023   0.110 +-0.026   0.333 +-0.042    0.06 +-0.02 
+                                       blend_final_M   60.77 +-3.01    0.590 +-0.052   0.742 +-0.020   0.107 +-0.024   0.303 +-0.047    0.05 +-0.01 
+                                       main_final_M    59.77 +-3.16    0.563 +-0.048   0.740 +-0.023   0.127 +-0.027   0.310 +-0.040    0.09 +-0.03 
+
+SPLIT BY MONSTERS (counted maps; ALL SUITES pools the maps of the four suites, each map once)
+suite            tier split      maps  agent           score            exit           kills            dead             tmo             rev        
+heldout_v1       4    heavy        58  main_0525_M     67.70 +-3.41    0.684 +-0.047   0.678 +-0.029   0.299 +-0.045   0.017 +-0.017    0.02 +-0.01 
+                                       blend_final_M   71.81 +-3.00    0.736 +-0.042   0.709 +-0.026   0.253 +-0.041   0.011 +-0.008    0.06 +-0.02 
+                                       main_final_M    69.47 +-2.75    0.690 +-0.041   0.692 +-0.025   0.287 +-0.041   0.023 +-0.011    0.03 +-0.01 
+heldout_v1       4    no heavy     42  main_0525_M     83.45 +-2.77    0.833 +-0.043   0.828 +-0.028   0.087 +-0.030   0.079 +-0.032    0.06 +-0.02 
+                                       blend_final_M   88.62 +-2.15    0.921 +-0.030   0.859 +-0.027   0.048 +-0.024   0.032 +-0.015    0.17 +-0.09 
+                                       main_final_M    83.69 +-3.10    0.857 +-0.043   0.813 +-0.031   0.079 +-0.030   0.063 +-0.031    0.08 +-0.06 
+heldout_v1       4    ref only      1* main_0525_M     82.13 +-0.00    1.000 +-0.000   0.571 +-0.000   0.000 +-0.000   0.000 +-0.000    0.33 +-0.00 
+                                       blend_final_M   82.35 +-0.00    1.000 +-0.000   0.571 +-0.000   0.000 +-0.000   0.000 +-0.000    3.00 +-0.00 
+                                       main_final_M    82.57 +-0.00    1.000 +-0.000   0.571 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+heldout_v1       3    no heavy    100  main_0525_M     90.89 +-1.21    0.947 +-0.016   0.895 +-0.016   0.013 +-0.008   0.040 +-0.014    0.02 +-0.01 
+                                       blend_final_M   92.11 +-0.94    0.963 +-0.012   0.905 +-0.016   0.003 +-0.003   0.033 +-0.012    0.05 +-0.02 
+                                       main_final_M    91.19 +-1.25    0.953 +-0.017   0.901 +-0.017   0.010 +-0.007   0.037 +-0.015    0.06 +-0.02 
+heldout_v1       3    ref only     28  main_0525_M     89.89 +-2.82    0.917 +-0.041   0.895 +-0.039   0.000 +-0.000   0.083 +-0.041    0.04 +-0.04 
+                                       blend_final_M   90.26 +-2.59    0.940 +-0.035   0.912 +-0.040   0.000 +-0.000   0.060 +-0.035    0.01 +-0.01 
+                                       main_final_M    90.62 +-2.12    0.952 +-0.028   0.842 +-0.051   0.000 +-0.000   0.048 +-0.028    0.06 +-0.04 
+heldout_v1       2    no heavy    100  main_0525_M     90.94 +-1.03    0.980 +-0.011   0.842 +-0.033   0.000 +-0.000   0.020 +-0.011    0.03 +-0.02 
+                                       blend_final_M   89.79 +-1.00    0.990 +-0.006   0.756 +-0.046   0.000 +-0.000   0.010 +-0.006    0.02 +-0.01 
+                                       main_final_M    89.82 +-1.30    0.963 +-0.016   0.829 +-0.035   0.000 +-0.000   0.037 +-0.016    0.03 +-0.02 
+heldout_v1       2    ref only     26  main_0525_M     89.31 +-2.00    0.974 +-0.018   0.810 +-0.065   0.000 +-0.000   0.026 +-0.018    0.05 +-0.04 
+                                       blend_final_M   87.91 +-1.78    0.987 +-0.013   0.735 +-0.084   0.000 +-0.000   0.013 +-0.013    0.00 +-0.00 
+                                       main_final_M    88.99 +-2.02    0.974 +-0.026   0.769 +-0.077   0.000 +-0.000   0.026 +-0.026    0.03 +-0.02 
+heldout_v1       1    heavy        10  main_0525_M     70.88 +-6.18    0.800 +-0.074   0.689 +-0.042   0.200 +-0.074   0.000 +-0.000    0.07 +-0.07 
+                                       blend_final_M   79.69 +-6.02    0.900 +-0.071   0.727 +-0.070   0.100 +-0.071   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    67.23 +-11.15   0.700 +-0.136   0.645 +-0.098   0.300 +-0.136   0.000 +-0.000    0.00 +-0.00 
+heldout_v1       1    no heavy     46  main_0525_M     86.88 +-2.65    0.935 +-0.027   0.726 +-0.036   0.065 +-0.027   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   86.81 +-2.76    0.935 +-0.029   0.746 +-0.035   0.065 +-0.029   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    87.56 +-2.76    0.920 +-0.030   0.797 +-0.029   0.080 +-0.030   0.000 +-0.000    0.00 +-0.00 
+heldout_v1       1    ref only      8* main_0525_M     92.15 +-5.03    1.000 +-0.000   0.778 +-0.152   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   87.88 +-5.47    0.958 +-0.042   0.704 +-0.175   0.042 +-0.042   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    83.95 +-7.62    0.875 +-0.088   0.759 +-0.155   0.125 +-0.088   0.000 +-0.000    0.00 +-0.00 
+heldout_v1       all  heavy        68  main_0525_M     67.83 +-3.28    0.701 +-0.041   0.679 +-0.026   0.284 +-0.040   0.015 +-0.015    0.03 +-0.02 
+                                       blend_final_M   72.13 +-2.89    0.760 +-0.038   0.711 +-0.025   0.230 +-0.037   0.010 +-0.007    0.05 +-0.02 
+                                       main_final_M    69.38 +-2.68    0.691 +-0.040   0.687 +-0.025   0.289 +-0.040   0.020 +-0.010    0.02 +-0.01 
+heldout_v1       all  no heavy    288  main_0525_M     88.90 +-0.89    0.940 +-0.011   0.831 +-0.014   0.028 +-0.007   0.032 +-0.008    0.02 +-0.01 
+                                       blend_final_M   90.30 +-0.72    0.962 +-0.008   0.835 +-0.015   0.019 +-0.006   0.020 +-0.005    0.05 +-0.02 
+                                       main_final_M    88.81 +-0.99    0.938 +-0.011   0.841 +-0.014   0.028 +-0.007   0.035 +-0.009    0.04 +-0.01 
+heldout_v1       all  ref only     63  main_0525_M     89.59 +-1.77    0.952 +-0.020   0.830 +-0.039   0.000 +-0.000   0.048 +-0.020    0.04 +-0.02 
+                                       blend_final_M   89.09 +-1.62    0.963 +-0.017   0.799 +-0.046   0.005 +-0.005   0.032 +-0.016    0.05 +-0.05 
+                                       main_final_M    89.47 +-1.46    0.952 +-0.020   0.789 +-0.044   0.016 +-0.012   0.032 +-0.016    0.04 +-0.02 
+heldout_wide_v1  4    heavy        37  main_0525_M     40.30 +-4.80    0.288 +-0.058   0.526 +-0.048   0.550 +-0.061   0.162 +-0.042    0.09 +-0.04 
+                                       blend_final_M   36.40 +-4.38    0.243 +-0.053   0.493 +-0.044   0.604 +-0.064   0.153 +-0.042    0.08 +-0.03 
+                                       main_final_M    37.12 +-4.41    0.207 +-0.054   0.553 +-0.049   0.568 +-0.066   0.225 +-0.050    0.08 +-0.03 
+heldout_wide_v1  4    no heavy     13  main_0525_M     75.45 +-4.55    0.718 +-0.074   0.846 +-0.039   0.103 +-0.044   0.179 +-0.061    0.00 +-0.00 
+                                       blend_final_M   78.77 +-4.11    0.769 +-0.079   0.846 +-0.037   0.077 +-0.041   0.154 +-0.072    0.13 +-0.06 
+                                       main_final_M    78.99 +-4.40    0.769 +-0.079   0.836 +-0.033   0.128 +-0.060   0.103 +-0.058    0.03 +-0.03 
+heldout_wide_v1  3    no heavy     50  main_0525_M     83.66 +-2.51    0.840 +-0.038   0.894 +-0.017   0.007 +-0.007   0.153 +-0.038    0.05 +-0.02 
+                                       blend_final_M   81.69 +-3.08    0.813 +-0.047   0.887 +-0.019   0.020 +-0.011   0.167 +-0.045    0.03 +-0.02 
+                                       main_final_M    79.63 +-3.53    0.780 +-0.052   0.873 +-0.021   0.040 +-0.018   0.180 +-0.051    0.06 +-0.02 
+heldout_wide_v1  3    ref only      3* main_0525_M     94.74 +-2.69    1.000 +-0.000   0.939 +-0.075   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   67.44 +-24.98   0.667 +-0.333   0.636 +-0.267   0.000 +-0.000   0.333 +-0.333    0.11 +-0.11 
+                                       main_final_M    68.65 +-24.55   0.667 +-0.333   0.667 +-0.262   0.000 +-0.000   0.333 +-0.333    0.00 +-0.00 
+heldout_wide_v1  2    no heavy     50  main_0525_M     79.52 +-3.01    0.827 +-0.046   0.806 +-0.029   0.000 +-0.000   0.173 +-0.046    0.01 +-0.01 
+                                       blend_final_M   81.51 +-2.41    0.893 +-0.039   0.816 +-0.032   0.000 +-0.000   0.107 +-0.039    0.09 +-0.05 
+                                       main_final_M    80.65 +-2.61    0.847 +-0.044   0.796 +-0.028   0.000 +-0.000   0.153 +-0.044    0.07 +-0.03 
+heldout_wide_v1  2    ref only      8* main_0525_M     89.33 +-3.57    0.958 +-0.042   0.874 +-0.067   0.000 +-0.000   0.042 +-0.042    0.00 +-0.00 
+                                       blend_final_M   90.37 +-1.99    1.000 +-0.000   0.920 +-0.029   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    89.41 +-2.46    0.958 +-0.042   0.943 +-0.034   0.000 +-0.000   0.042 +-0.042    0.04 +-0.04 
+heldout_wide_v1  1    heavy        16  main_0525_M     66.01 +-7.25    0.771 +-0.095   0.526 +-0.076   0.229 +-0.095   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   72.28 +-6.64    0.833 +-0.075   0.602 +-0.070   0.167 +-0.075   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    65.47 +-7.21    0.750 +-0.089   0.567 +-0.052   0.229 +-0.079   0.021 +-0.021    0.00 +-0.00 
+heldout_wide_v1  1    no heavy     10  main_0525_M     93.57 +-1.32    1.000 +-0.000   0.815 +-0.045   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   90.92 +-3.49    0.967 +-0.033   0.774 +-0.071   0.033 +-0.033   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    82.35 +-7.10    0.867 +-0.074   0.673 +-0.103   0.133 +-0.074   0.000 +-0.000    0.00 +-0.00 
+heldout_wide_v1  1    ref only      1* main_0525_M     93.64 +-0.00    1.000 +-0.000   0.733 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   94.94 +-0.00    1.000 +-0.000   0.867 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    94.26 +-0.00    1.000 +-0.000   0.800 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+heldout_wide_v1  all  heavy        53  main_0525_M     42.80 +-4.39    0.434 +-0.058   0.526 +-0.041   0.453 +-0.055   0.113 +-0.031    0.06 +-0.03 
+                                       blend_final_M   39.90 +-4.01    0.421 +-0.057   0.515 +-0.038   0.472 +-0.057   0.107 +-0.031    0.06 +-0.02 
+                                       main_final_M    39.89 +-4.05    0.371 +-0.057   0.556 +-0.040   0.465 +-0.056   0.164 +-0.038    0.06 +-0.02 
+heldout_wide_v1  all  no heavy    123  main_0525_M     81.28 +-1.72    0.835 +-0.026   0.853 +-0.014   0.014 +-0.006   0.152 +-0.025    0.02 +-0.01 
+                                       blend_final_M   81.44 +-1.81    0.854 +-0.026   0.850 +-0.016   0.019 +-0.007   0.127 +-0.025    0.06 +-0.02 
+                                       main_final_M    79.94 +-2.04    0.813 +-0.029   0.828 +-0.018   0.041 +-0.012   0.146 +-0.028    0.05 +-0.02 
+heldout_wide_v1  all  ref only     12  main_0525_M     91.37 +-2.39    0.972 +-0.028   0.874 +-0.050   0.000 +-0.000   0.028 +-0.028    0.00 +-0.00 
+                                       blend_final_M   82.61 +-8.73    0.917 +-0.083   0.844 +-0.064   0.000 +-0.000   0.083 +-0.083    0.03 +-0.03 
+                                       main_final_M    82.41 +-8.63    0.889 +-0.085   0.859 +-0.065   0.000 +-0.000   0.111 +-0.085    0.03 +-0.03 
+authored_v1      4    heavy         1* main_0525_M     36.63 +-0.00    0.400 +-0.000   0.455 +-0.000   0.600 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M    9.62 +-0.00    0.000 +-0.000   0.436 +-0.000   1.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    13.93 +-0.00    0.000 +-0.000   0.527 +-0.000   1.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+authored_v1      4    no heavy      1* main_0525_M     59.21 +-0.00    0.600 +-0.000   0.754 +-0.000   0.400 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   48.22 +-0.00    0.400 +-0.000   0.708 +-0.000   0.600 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    73.94 +-0.00    0.800 +-0.000   0.754 +-0.000   0.200 +-0.000   0.000 +-0.000    0.00 +-0.00 
+authored_v1      3    heavy         1* main_0525_M     96.35 +-0.00    1.000 +-0.000   0.900 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   95.62 +-0.00    1.000 +-0.000   0.867 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    84.86 +-0.00    0.800 +-0.000   0.967 +-0.000   0.000 +-0.000   0.200 +-0.000    0.00 +-0.00 
+authored_v1      3    no heavy     15  main_0525_M     88.73 +-3.34    0.907 +-0.047   0.885 +-0.030   0.013 +-0.013   0.080 +-0.047    0.00 +-0.00 
+                                       blend_final_M   90.74 +-4.83    0.933 +-0.054   0.901 +-0.038   0.000 +-0.000   0.067 +-0.054    0.00 +-0.00 
+                                       main_final_M    90.95 +-2.59    0.933 +-0.032   0.903 +-0.030   0.027 +-0.018   0.040 +-0.029    0.01 +-0.01 
+authored_v1      2    no heavy     17  main_0525_M     89.05 +-2.08    0.965 +-0.019   0.823 +-0.044   0.000 +-0.000   0.035 +-0.019    0.04 +-0.02 
+                                       blend_final_M   90.04 +-1.71    1.000 +-0.000   0.814 +-0.045   0.000 +-0.000   0.000 +-0.000    0.05 +-0.04 
+                                       main_final_M    90.11 +-2.10    0.976 +-0.024   0.852 +-0.036   0.000 +-0.000   0.024 +-0.024    0.08 +-0.04 
+authored_v1      2    ref only      2* main_0525_M     87.93 +-10.49   1.000 +-0.000   0.775 +-0.169   0.000 +-0.000   0.000 +-0.000    0.10 +-0.10 
+                                       blend_final_M   83.51 +-7.11    1.000 +-0.000   0.800 +-0.150   0.000 +-0.000   0.000 +-0.000    0.30 +-0.30 
+                                       main_final_M    82.67 +-8.05    1.000 +-0.000   0.800 +-0.150   0.000 +-0.000   0.000 +-0.000    0.30 +-0.30 
+authored_v1      1    heavy         9* main_0525_M     88.56 +-2.95    0.933 +-0.033   0.830 +-0.058   0.022 +-0.022   0.044 +-0.029    0.00 +-0.00 
+                                       blend_final_M   91.38 +-3.11    0.978 +-0.022   0.808 +-0.077   0.022 +-0.022   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    85.64 +-6.44    0.911 +-0.068   0.811 +-0.074   0.067 +-0.067   0.022 +-0.022    0.00 +-0.00 
+authored_v1      1    no heavy      4* main_0525_M     83.44 +-12.51   0.850 +-0.150   0.858 +-0.071   0.150 +-0.150   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   83.96 +-8.45    0.850 +-0.096   0.883 +-0.047   0.100 +-0.100   0.050 +-0.050    0.00 +-0.00 
+                                       main_final_M    86.71 +-9.07    0.900 +-0.100   0.825 +-0.089   0.100 +-0.100   0.000 +-0.000    0.00 +-0.00 
+authored_v1      all  heavy        11  main_0525_M     77.04 +-1.66    0.891 +-0.056   0.777 +-0.072   0.073 +-0.056   0.036 +-0.024    0.00 +-0.00 
+                                       blend_final_M   71.74 +-1.75    0.891 +-0.091   0.754 +-0.080   0.109 +-0.091   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    67.56 +-3.62    0.818 +-0.099   0.780 +-0.073   0.145 +-0.101   0.036 +-0.024    0.00 +-0.00 
+authored_v1      all  no heavy     37  main_0525_M     87.25 +-2.00    0.919 +-0.027   0.850 +-0.024   0.032 +-0.020   0.049 +-0.021    0.02 +-0.01 
+                                       blend_final_M   88.20 +-2.62    0.941 +-0.029   0.854 +-0.027   0.027 +-0.019   0.032 +-0.023    0.02 +-0.02 
+                                       main_final_M    89.65 +-1.63    0.946 +-0.020   0.866 +-0.023   0.027 +-0.014   0.027 +-0.016    0.04 +-0.02 
+authored_v1      all  ref only      2* main_0525_M     87.93 +-10.49   1.000 +-0.000   0.775 +-0.169   0.000 +-0.000   0.000 +-0.000    0.10 +-0.10 
+                                       blend_final_M   83.51 +-7.11    1.000 +-0.000   0.800 +-0.150   0.000 +-0.000   0.000 +-0.000    0.30 +-0.30 
+                                       main_final_M    82.67 +-8.05    1.000 +-0.000   0.800 +-0.150   0.000 +-0.000   0.000 +-0.000    0.30 +-0.30 
+authored_hard_v1 4    heavy        19  main_0525_M     47.14 +-5.01    0.305 +-0.069   0.675 +-0.033   0.242 +-0.056   0.453 +-0.073    0.04 +-0.02 
+                                       blend_final_M   51.41 +-4.94    0.368 +-0.067   0.683 +-0.027   0.232 +-0.047   0.400 +-0.067    0.07 +-0.03 
+                                       main_final_M    48.52 +-4.99    0.326 +-0.063   0.678 +-0.037   0.284 +-0.060   0.389 +-0.062    0.11 +-0.03 
+authored_hard_v1 4    no heavy      9* main_0525_M     49.60 +-9.75    0.311 +-0.130   0.695 +-0.076   0.156 +-0.093   0.533 +-0.120    0.16 +-0.09 
+                                       blend_final_M   46.31 +-6.61    0.244 +-0.099   0.691 +-0.052   0.178 +-0.091   0.578 +-0.131    0.07 +-0.03 
+                                       main_final_M    51.40 +-9.16    0.378 +-0.122   0.676 +-0.059   0.133 +-0.075   0.489 +-0.125    0.27 +-0.17 
+authored_hard_v1 3    heavy         1* main_0525_M     42.87 +-0.00    0.200 +-0.000   0.750 +-0.000   0.000 +-0.000   0.800 +-0.000    0.00 +-0.00 
+                                       blend_final_M   31.48 +-0.00    0.000 +-0.000   0.800 +-0.000   0.000 +-0.000   1.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    27.82 +-0.00    0.000 +-0.000   0.725 +-0.000   0.200 +-0.000   0.800 +-0.000    0.00 +-0.00 
+authored_hard_v1 3    no heavy     12  main_0525_M     77.80 +-6.47    0.717 +-0.094   0.873 +-0.037   0.017 +-0.017   0.267 +-0.090    0.08 +-0.04 
+                                       blend_final_M   74.84 +-8.38    0.667 +-0.124   0.875 +-0.035   0.000 +-0.000   0.333 +-0.124    0.07 +-0.04 
+                                       main_final_M    74.98 +-7.02    0.667 +-0.099   0.865 +-0.040   0.017 +-0.017   0.317 +-0.094    0.08 +-0.03 
+authored_hard_v1 2    no heavy     13  main_0525_M     80.23 +-3.37    0.815 +-0.058   0.843 +-0.033   0.000 +-0.000   0.185 +-0.058    0.02 +-0.02 
+                                       blend_final_M   85.67 +-2.03    0.969 +-0.021   0.777 +-0.046   0.000 +-0.000   0.031 +-0.021    0.03 +-0.02 
+                                       main_final_M    81.11 +-3.38    0.831 +-0.067   0.835 +-0.034   0.000 +-0.000   0.169 +-0.067    0.02 +-0.02 
+authored_hard_v1 2    ref only      1* main_0525_M     93.21 +-0.00    1.000 +-0.000   0.943 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   85.10 +-0.00    1.000 +-0.000   0.743 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    94.90 +-0.00    1.000 +-0.000   1.000 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+authored_hard_v1 1    heavy         3* main_0525_M     82.66 +-10.43   0.867 +-0.133   0.780 +-0.020   0.067 +-0.067   0.067 +-0.067    0.00 +-0.00 
+                                       blend_final_M   80.82 +-10.32   0.867 +-0.133   0.710 +-0.023   0.133 +-0.133   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    74.34 +-9.84    0.800 +-0.115   0.640 +-0.058   0.200 +-0.115   0.000 +-0.000    0.00 +-0.00 
+authored_hard_v1 1    no heavy      3* main_0525_M     90.87 +-6.10    0.933 +-0.067   0.905 +-0.053   0.067 +-0.067   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   96.25 +-0.55    1.000 +-0.000   0.937 +-0.037   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    95.23 +-1.72    1.000 +-0.000   0.853 +-0.105   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+authored_hard_v1 all  heavy        23  main_0525_M     48.28 +-4.66    0.374 +-0.071   0.684 +-0.030   0.209 +-0.049   0.417 +-0.069    0.03 +-0.02 
+                                       blend_final_M   51.76 +-4.59    0.417 +-0.070   0.688 +-0.025   0.209 +-0.043   0.374 +-0.068    0.06 +-0.03 
+                                       main_final_M    48.71 +-4.64    0.374 +-0.066   0.677 +-0.033   0.270 +-0.051   0.357 +-0.062    0.09 +-0.03 
+authored_hard_v1 all  no heavy     37  main_0525_M     68.76 +-4.27    0.670 +-0.059   0.807 +-0.033   0.049 +-0.025   0.281 +-0.052    0.07 +-0.03 
+                                       blend_final_M   68.09 +-3.84    0.697 +-0.066   0.787 +-0.028   0.043 +-0.025   0.259 +-0.062    0.05 +-0.02 
+                                       main_final_M    68.75 +-4.21    0.681 +-0.058   0.793 +-0.030   0.038 +-0.020   0.281 +-0.053    0.10 +-0.04 
+authored_hard_v1 all  ref only      1* main_0525_M     93.21 +-0.00    1.000 +-0.000   0.943 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   85.10 +-0.00    1.000 +-0.000   0.743 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    94.90 +-0.00    1.000 +-0.000   1.000 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+ALL SUITES       4    heavy       115  main_0525_M     55.21 +-2.71    0.492 +-0.037   0.617 +-0.024   0.373 +-0.033   0.136 +-0.025    0.05 +-0.01 
+                                       blend_final_M   56.51 +-2.69    0.510 +-0.036   0.619 +-0.023   0.369 +-0.034   0.121 +-0.022    0.07 +-0.01 
+                                       main_final_M    55.12 +-2.56    0.468 +-0.036   0.635 +-0.023   0.383 +-0.034   0.148 +-0.024    0.06 +-0.01 
+ALL SUITES       4    no heavy     65  main_0525_M     76.79 +-2.78    0.734 +-0.042   0.805 +-0.024   0.105 +-0.025   0.161 +-0.034    0.06 +-0.02 
+                                       blend_final_M   80.17 +-2.60    0.789 +-0.040   0.819 +-0.022   0.080 +-0.023   0.131 +-0.034    0.14 +-0.06 
+                                       main_final_M    78.13 +-2.83    0.772 +-0.041   0.790 +-0.024   0.098 +-0.025   0.129 +-0.033    0.09 +-0.05 
+ALL SUITES       4    ref only      1* main_0525_M     82.13 +-0.00    1.000 +-0.000   0.571 +-0.000   0.000 +-0.000   0.000 +-0.000    0.33 +-0.00 
+                                       blend_final_M   82.35 +-0.00    1.000 +-0.000   0.571 +-0.000   0.000 +-0.000   0.000 +-0.000    3.00 +-0.00 
+                                       main_final_M    82.57 +-0.00    1.000 +-0.000   0.571 +-0.000   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+ALL SUITES       3    heavy         2* main_0525_M     69.61 +-26.74   0.600 +-0.400   0.814 +-0.073   0.000 +-0.000   0.400 +-0.400    0.00 +-0.00 
+                                       blend_final_M   63.55 +-32.07   0.500 +-0.500   0.829 +-0.033   0.000 +-0.000   0.500 +-0.500    0.00 +-0.00 
+                                       main_final_M    56.34 +-28.52   0.400 +-0.400   0.829 +-0.118   0.100 +-0.100   0.500 +-0.300    0.00 +-0.00 
+ALL SUITES       3    no heavy    177  main_0525_M     87.78 +-1.15    0.898 +-0.017   0.890 +-0.010   0.012 +-0.005   0.091 +-0.016    0.03 +-0.01 
+                                       blend_final_M   87.88 +-1.29    0.898 +-0.019   0.894 +-0.011   0.008 +-0.004   0.094 +-0.018    0.04 +-0.01 
+                                       main_final_M    86.80 +-1.39    0.883 +-0.020   0.886 +-0.012   0.020 +-0.007   0.096 +-0.019    0.06 +-0.01 
+ALL SUITES       3    ref only     31  main_0525_M     90.36 +-2.57    0.925 +-0.037   0.902 +-0.035   0.000 +-0.000   0.075 +-0.037    0.03 +-0.03 
+                                       blend_final_M   88.05 +-3.32    0.914 +-0.044   0.868 +-0.052   0.000 +-0.000   0.086 +-0.044    0.02 +-0.01 
+                                       main_final_M    88.50 +-2.99    0.925 +-0.040   0.814 +-0.057   0.000 +-0.000   0.075 +-0.040    0.05 +-0.03 
+ALL SUITES       2    no heavy    180  main_0525_M     86.82 +-1.12    0.924 +-0.016   0.826 +-0.017   0.000 +-0.000   0.076 +-0.016    0.02 +-0.01 
+                                       blend_final_M   87.22 +-0.93    0.963 +-0.012   0.792 +-0.021   0.000 +-0.000   0.037 +-0.012    0.04 +-0.02 
+                                       main_final_M    86.67 +-1.11    0.923 +-0.017   0.822 +-0.017   0.000 +-0.000   0.077 +-0.017    0.04 +-0.01 
+ALL SUITES       2    ref only     37  main_0525_M     89.34 +-1.63    0.973 +-0.015   0.837 +-0.042   0.000 +-0.000   0.027 +-0.015    0.04 +-0.03 
+                                       blend_final_M   88.13 +-1.36    0.991 +-0.009   0.799 +-0.049   0.000 +-0.000   0.009 +-0.009    0.02 +-0.02 
+                                       main_final_M    88.90 +-1.56    0.973 +-0.020   0.843 +-0.047   0.000 +-0.000   0.027 +-0.020    0.04 +-0.02 
+ALL SUITES       1    heavy        38  main_0525_M     73.95 +-3.83    0.825 +-0.046   0.652 +-0.044   0.160 +-0.046   0.016 +-0.009    0.02 +-0.02 
+                                       blend_final_M   79.43 +-3.51    0.888 +-0.038   0.685 +-0.042   0.112 +-0.038   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    71.41 +-4.61    0.779 +-0.055   0.644 +-0.040   0.207 +-0.052   0.014 +-0.010    0.00 +-0.00 
+ALL SUITES       1    no heavy     63  main_0525_M     87.92 +-2.10    0.940 +-0.022   0.765 +-0.027   0.060 +-0.022   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   87.73 +-2.15    0.938 +-0.022   0.775 +-0.028   0.059 +-0.022   0.003 +-0.003    0.00 +-0.00 
+                                       main_final_M    87.05 +-2.36    0.914 +-0.025   0.779 +-0.031   0.086 +-0.025   0.000 +-0.000    0.00 +-0.00 
+ALL SUITES       1    ref only      9* main_0525_M     92.31 +-4.44    1.000 +-0.000   0.768 +-0.118   0.000 +-0.000   0.000 +-0.000    0.00 +-0.00 
+                                       blend_final_M   88.67 +-4.88    0.963 +-0.037   0.739 +-0.140   0.037 +-0.037   0.000 +-0.000    0.00 +-0.00 
+                                       main_final_M    85.09 +-6.81    0.889 +-0.079   0.768 +-0.121   0.111 +-0.079   0.000 +-0.000    0.00 +-0.00 
+ALL SUITES       all  heavy       155  main_0525_M     56.80 +-2.51    0.575 +-0.032   0.625 +-0.021   0.316 +-0.028   0.110 +-0.019    0.04 +-0.01 
+                                       blend_final_M   58.32 +-2.50    0.603 +-0.032   0.632 +-0.020   0.301 +-0.029   0.096 +-0.018    0.05 +-0.01 
+                                       main_final_M    56.36 +-2.39    0.544 +-0.032   0.638 +-0.020   0.336 +-0.029   0.120 +-0.019    0.04 +-0.01 
+ALL SUITES       all  no heavy    485  main_0525_M     85.15 +-0.85    0.891 +-0.011   0.836 +-0.010   0.026 +-0.005   0.083 +-0.010    0.03 +-0.01 
+                                       blend_final_M   86.02 +-0.85    0.913 +-0.010   0.834 +-0.010   0.021 +-0.005   0.066 +-0.009    0.05 +-0.01 
+                                       main_final_M    84.92 +-0.93    0.887 +-0.012   0.832 +-0.010   0.032 +-0.006   0.081 +-0.010    0.05 +-0.01 
+ALL SUITES       all  ref only     78  main_0525_M     89.85 +-1.50    0.957 +-0.017   0.842 +-0.030   0.000 +-0.000   0.043 +-0.017    0.04 +-0.02 
+                                       blend_final_M   87.99 +-1.82    0.957 +-0.019   0.808 +-0.035   0.004 +-0.004   0.038 +-0.018    0.05 +-0.04 
+                                       main_final_M    88.36 +-1.71    0.944 +-0.021   0.814 +-0.035   0.013 +-0.010   0.043 +-0.019    0.04 +-0.02 
+
+MAPS IN EACH SPLIT (heavy, no heavy, ref only and no monst are of the counted maps)
+suite            tier      maps     exit  no exit  counted    heavy no heavy ref only no monst
+heldout_v1       1         100       56       44       56       10       46        8*       0 
+heldout_v1       2         100      100        0      100        0      100       26       41 
+heldout_v1       3         100      100        0      100        0      100       28        0 
+heldout_v1       4         100      100        0      100       58       42        1*       0 
+heldout_v1       all       400      356       44      356       68      288       63       41 
+heldout_wide_v1  1          50       26       24       26       16       10        1*       0 
+heldout_wide_v1  2          50       50        0       50        0       50        8*      20 
+heldout_wide_v1  3          50       50        0       50        0       50        3*       0 
+heldout_wide_v1  4          50       50        0       50       37       13        0        0 
+heldout_wide_v1  all       200      176       24      176       53      123       12       20 
+authored_v1      1          24       13       11       13        9*       4*       0        0 
+authored_v1      2          17       17        0       17        0       17        2*       0 
+authored_v1      3          16       16        0       16        1*      15        0        0 
+authored_v1      4           2*       2*       0        2*       1*       1*       0        0 
+authored_v1      all        59       48       11       48       11       37        2*       0 
+authored_hard_v1 1           6*       6*       0        6*       3*       3*       0        0 
+authored_hard_v1 2          13       13        0       13        0       13        1*       0 
+authored_hard_v1 3          13       13        0       13        1*      12        0        0 
+authored_hard_v1 4          28       28        0       28       19        9*       0        0 
+authored_hard_v1 all        60       60        0       60       23       37        1*       0 
+ALL SUITES       1         180      101       79      101       38       63        9*       0 
+ALL SUITES       2         180      180        0      180        0      180       37       61 
+ALL SUITES       3         179      179        0      179        2*     177       31        0 
+ALL SUITES       4         180      180        0      180      115       65        1*       0 
+ALL SUITES       all       719      640       79      640      155      485       78       61 
+
+PAIRED  B = blend_final_M  minus  A = main_0525_M  (same maps, same seeds; composite points)
+                                   maps    B - A     se  margin  verdict
+headline (weighted)                 640    +0.70   0.74    1.49  level
+headline (unweighted)               640    +0.86   0.81    1.61  level
+heldout_v1 (weighted)               356    +1.69   0.75    1.49  better by more than noise
+heldout_wide_v1 (weighted)          176    -0.30   1.57    3.14  level
+authored_v1 (weighted)               48    +0.58   1.76    3.52  level
+authored_hard_v1 (weighted)          60    +0.22   2.05    4.09  level
+heldout_v1 (unweighted)             356    +2.14   0.88    1.76  better by more than noise
+heldout_wide_v1 (unweighted)        176    -0.90   1.73    3.47  level
+authored_v1 (unweighted)             48    -0.03   1.70    3.41  level
+authored_hard_v1 (unweighted)        60    +1.19   2.26    4.52  level
+tier 4 heavy, all suites (info)     115    +1.29   2.09    4.17  level
+tier 4 no heavy, all suites (info)   65    +3.38   1.93    3.86  level
+
+PAIRED  B = main_final_M  minus  A = main_0525_M  (same maps, same seeds; composite points)
+                                   maps    B - A     se  margin  verdict
+headline (weighted)                 640    +0.07   0.65    1.30  level
+headline (unweighted)               640    -0.11   0.76    1.52  level
+heldout_v1 (weighted)               356    +0.08   0.76    1.51  level
+heldout_wide_v1 (weighted)          176    -1.58   1.62    3.24  level
+authored_v1 (weighted)               48    +1.71   1.49    2.98  level
+authored_hard_v1 (weighted)          60    +0.09   1.61    3.22  level
+heldout_v1 (unweighted)             356    +0.33   0.87    1.75  level
+heldout_wide_v1 (unweighted)        176    -1.89   1.57    3.15  level
+authored_v1 (unweighted)             48    +0.55   1.87    3.74  level
+authored_hard_v1 (unweighted)        60    +0.19   1.97    3.94  level
+tier 4 heavy, all suites (info)     115    -0.10   1.83    3.66  level
+tier 4 no heavy, all suites (info)   65    +1.34   1.68    3.35  level
+
+PAIRED  B = main_final_M  minus  A = blend_final_M  (same maps, same seeds; composite points)
+                                   maps    B - A     se  margin  verdict
+headline (weighted)                 640    -0.63   0.73    1.47  level
+headline (unweighted)               640    -0.97   0.72    1.44  level
+heldout_v1 (weighted)               356    -1.62   0.82    1.64  level
+heldout_wide_v1 (weighted)          176    -1.28   1.48    2.95  level
+authored_v1 (weighted)               48    +1.12   1.82    3.63  level
+authored_hard_v1 (weighted)          60    -0.13   1.96    3.91  level
+heldout_v1 (unweighted)             356    -1.81   0.88    1.77  worse by more than noise
+heldout_wide_v1 (unweighted)        176    -0.99   1.42    2.83  level
+authored_v1 (unweighted)             48    +0.58   1.64    3.28  level
+authored_hard_v1 (unweighted)        60    -1.00   1.94    3.88  level
+tier 4 heavy, all suites (info)     115    -1.39   1.63    3.25  level
+tier 4 no heavy, all suites (info)   65    -2.04   2.07    4.15  level
+
+DECISION (A = main_0525_M, B = blend_final_M): KEEP main_0525_M: B's weighted headline is level (+0.70, needs more than 1.49)
+DECISION (A = main_0525_M, B = main_final_M): KEEP main_0525_M: B's weighted headline is level (+0.07, needs more than 1.30)
+FINAL PICK: main_0525_M
+
+note: heldout_v1: cells with fewer than 10 maps, too few to read a difference from: tier 1: 8 ref only; tier 4: 1 ref only
+note: heldout_wide_v1: cells with fewer than 10 maps, too few to read a difference from: tier 1: 1 ref only; tier 2: 8 ref only; tier 3: 3 ref only
+note: authored_v1: cells with fewer than 10 maps, too few to read a difference from: tier 1: 9 heavy, 4 no heavy; tier 2: 2 ref only; tier 3: 1 heavy; tier 4: 2 counted, 1 heavy, 1 no heavy
+note: authored_hard_v1: cells with fewer than 10 maps, too few to read a difference from: tier 1: 6 counted, 3 heavy, 3 no heavy; tier 2: 1 ref only; tier 3: 1 heavy; tier 4: 9 no heavy
+note: ALL SUITES: cells with fewer than 10 maps, too few to read a difference from: tier 1: 9 ref only; tier 3: 2 heavy; tier 4: 1 ref only
+note: maps with reference monsters only, the four suites together: tier 1: 9, tier 2: 37, tier 3: 31, tier 4: 1
