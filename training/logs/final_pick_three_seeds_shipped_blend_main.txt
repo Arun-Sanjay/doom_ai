@@ -12,7 +12,7 @@ B blend_final_M  heldout_v1 400+800, heldout_wide_v1 200+400, heldout_ref_v1 240
 C main_final_M   heldout_v1 400+800, heldout_wide_v1 200+400, heldout_ref_v1 240+480; same policy file as the seed 0 run; 480 s
    maps whose seed 1 score differs from seed 0: heldout_v1 338/400, heldout_wide_v1 171/200, heldout_ref_v1 224/240
 repeat check: REPRO main_0525_M heldout_v1 seed 0: 0 of 20 episodes differ from runs/final/main_0525_M/heldout_v1.csv (episodes repeat exactly)
-seed 0 headline recomputed here: A 78.43, B 80.30, C 79.47  (6:18 report: A 78.43, B 79.47, C 78.10)
+seed 0 headline recomputed here: A 78.43, B 80.30, C 79.47
 
 PER SUITE, SEEDS 0-2 (counted maps; rates are means over maps of the per-map seed means; counts are episodes)
 suite                    maps agent  weighted         tier-wtd           exit           dead        timeout              exits  deaths timeouts
@@ -204,11 +204,7 @@ main_final_M  dense     120    -5.53   2.21    4.41  worse by more than noise
 main_final_M  both      240    -3.88   1.32    2.64  worse by more than noise
 
 READINGS
-B - A (main_final_M vs shipped main_0525_M): headline WEAKENED to nothing: +1.04 +-0.89 on seed 0, -0.41 +-0.69 on the two fresh seeds, +0.07 +-0.65 on three (level; B's +2.80 on heldout_v1 did not repeat: -1.29 fresh, +0.08 on three). Organizer-style: the seed 0 tie (-0.02 +-2.28) is NOT confirmed: +4.15 +-1.58 fresh, +2.76 +-1.33 on three, beyond noise but only just (margin 2.65), neither half beyond noise on its own.
-C - A (clone_final_M vs shipped main_0525_M): CONFIRMED on both counts: headline level (-0.33 +-0.93 -> -0.57 +-0.73), organizer-style C ahead beyond noise and repeated on fresh seeds alone (+5.57 +-2.40 seed 0, +4.46 +-1.54 fresh, +4.83 +-1.26 on three; normal +3.15 +-1.55, dense +6.51 +-2.00, both beyond noise). WEAKENED: C's heldout_v1 win (+3.19 -> -0.05 fresh, +1.03 +-0.81 on three, now level). Unchanged (no new data): authored_v1 +4.08 +-1.68 better, authored_hard_v1 -5.71 +-2.01 worse.
-C - B (clone_final_M vs main_final_M): headline CONFIRMED level (-1.37 +-0.76 -> -0.64 +-0.66); organizer-style lead WEAKENED to level: +5.58 +-2.56 on seed 0 but +0.32 +-1.57 on fresh seeds, +2.07 +-1.41 on three (margin 2.82). Unchanged (no new data): authored_hard_v1 -5.80 +-1.89 worse for C.
-Heavy / no heavy, pooled over the four final-pick suites, three seeds: every pair level in both splits (heavy: B-A -0.44 +-1.68, C-A -2.56 +-1.92, C-B -2.13 +-1.77; no heavy: B-A -0.23 +-0.68, C-A +0.25 +-0.69, C-B +0.48 +-0.68).
-By final_pick.decide on three seeds A (main_0525_M) keeps its place against both: no headline difference is beyond noise. On the organizer-style suite both B and C are ahead of A beyond noise (C clearly, B narrowly) and C - B is level.
+(the automatic reading text was written for another pair of agents and has been removed; in this file A = main_0525_M, B = blend_final_M, C = main_final_M: read the tables above)
 Limits: the hand-drawn suites (45% of the headline) have no new seeds; the engine seed changes the score on about 85-94% of maps; many pair-by-suite cells were tested, so a verdict that clears its margin by a hair (B - A organizer-style, C - A normal half) is weak evidence.
 
 ====================================================================================================

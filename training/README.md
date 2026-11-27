@@ -20,15 +20,16 @@ Run every command from the repository root in the project environment (`uv run p
 | 1. Maps | `mapgen/`, `suites/` | training maps with a manifest; frozen held-out suites | `suites/checksums.json` |
 | 2. Navigation teacher | `teacher/` | labels inside the PPO workers; nothing shipped | `logs/teacher_gate.csv`, `logs/teacher_failures.json` |
 | 3. Exit detector | `exit_label.py`, `exitdet/` | `submission/weights/exit_detector.pt` | `logs/exit_detector*.csv`, `logs/exit_detector.json` |
-| 4. PPO with curiosity and curriculum | `rl/`, `configs/` | checkpoints; `submission/weights/policy.pt` through `rl/export.py` | `logs/unified_full_2_train_log.csv` (phase two of the run behind the shipped policy), `logs/manager_probe.txt`, `logs/smoke_arena.*`, `logs/unified_smoke.*`, `logs/unified_combat_keep.csv` |
-| 5. Evaluation and promotion | `scorer.py`, `runner.py`, `evaluate.py`, `promote.py`, `final_pick.py`, `mapmeta.py`, `demo.py`, `bench/`, `ops/` | scores of every checkpoint on the frozen suites; the ship gate; the final-pick report | `logs/results.csv`, `logs/final_pick_report_*.txt`, `logs/failure_breakdown_main_0135.txt`, `logs/latency.txt`, `logs/fresh_clone_validation.txt` |
+| 4. PPO with curiosity and curriculum | `rl/`, `configs/` | checkpoints; `submission/weights/policy.pt` through `rl/export.py`, from one checkpoint or from a weight average of two (`rl/average.py`) | `logs/unified_full_2_train_log.csv` (phase two of the run behind the shipped policy), `logs/manager_probe.txt`, `logs/smoke_arena.*`, `logs/unified_smoke.*`, `logs/unified_combat_keep.csv` |
+| 5. Evaluation and promotion | `scorer.py`, `runner.py`, `evaluate.py`, `promote.py`, `final_pick.py`, `mapmeta.py`, `demo.py`, `bench/`, `ops/` | scores of every checkpoint on the frozen suites; the ship gate; the final-pick report | `logs/results.csv`, `logs/final_pick_report_*.txt`, `logs/final_pick_0618.txt`, `logs/final_pick_0630_with_blend.txt`, `logs/final_pick_three_seeds_*.txt`, `logs/failure_breakdown_main_0135.txt`, `logs/latency.txt`, `logs/fresh_clone_validation.txt` |
 
 What is learned by which stage: the exit detector by supervised learning in stage 3; everything
 in `PolicyNet` by stage 4. Combat (the attack and weapon heads, and every button while an enemy
 is visible) is learned by PPO alone. Navigation is learned by PPO together with distillation from
 the stage 2 teacher, whose weight is stepped down only while the held-out exit rate of the policy
-alone holds. In the run behind the shipped policy that weight reached zero 44.2 M steps into
-phase two; every later step is PPO alone ("What was run", below).
+alone holds. In the runs behind the shipped policy that weight reached zero 44.2 M steps into
+phase two; every later step, of the main run and of the branch that left it at 125.3 M steps, is
+PPO alone ("What was run", below).
 
 ## 1. Maps
 
@@ -61,7 +62,11 @@ stimpack).
 Three training sets were used. `train` (1,500 maps) for the combat run and phase one; `train_v2`
 (3,000 maps, 90% of them with a start on the teacher's grid) for the first 5.1 M steps of phase
 two; `train_v3` (`train_v2` plus 1,500 wide maps, 4,500 in all, 4,056 with teacher labels) for the
-rest of phase two. The commands for the last two are in `mapgen/README.md`.
+rest of phase two. The commands for the last two are in `mapgen/README.md`. A fourth set,
+`train_mix_ref50`, is the map set of the branch of phase two: all 3,000 maps of `train_ref_v1`
+(the two reference profiles, 1,500 maps each) plus 3,000 maps of `train_v3` chosen at random, as
+many per tier (450, 750, 750 and 1,050 in tiers 1 to 4, no tier 0). `rl/mix_manifests.py` writes
+such a manifest; the commands are in the top-level README (step 1b).
 
 ```bash
 # the first training set: 300 maps per tier, half of them randomised (1,500 maps, 743 randomised)
@@ -202,6 +207,7 @@ Files (details and every setting in [rl/README.md](rl/README.md)):
 | `rl/curriculum.py` | stages over map tiers, then adaptive sampling |
 | `rl/train.py` | entry point, CSV log, checkpoints |
 | `rl/export.py`, `rl/provenance.py` | write a checkpoint in the agent's format; tie every checkpoint to the code that trained it |
+| `rl/average.py`, `rl/mix_manifests.py` | weighted average of the network weights of checkpoints of one architecture; the map set of the branch (all of one manifest plus as many maps of another, tier by tier) |
 | `rl/play.py`, `rl/eval_alone.py`, `rl/agree.py`, `rl/bench.py`, `rl/select_maps.py` | play a checkpoint, exit rate alone, agreement with the teacher, throughput, map filters |
 | `configs/` | `combat_1.json`, `unified_full.json`, `unified_nav.json`, `unified_smoke.json`, each unified config with a `.txt` that explains every setting, and `LAUNCH.txt` |
 
@@ -311,14 +317,16 @@ combat checkpoint), and `unified_full_2_train_log.csv`, the log of phase two of 
 shipped policy.
 
 **What was run for the shipped policy.** Three runs in a row on rented machines, each started from
-the last checkpoint of the one before. The step counts of the first two are the counters stored in
-their last checkpoints; their `train_log.csv` files were not brought back from the machines.
+the last checkpoint of the one before, and a branch of the third on a second machine. The step
+counts of the first two are the counters stored in their last checkpoints; their `train_log.csv`
+files were not brought back from the machines; the branch's log is not in this repository either.
 
 | Run | Config | Maps | Steps | Teacher |
 |---|---|---|---|---|
 | `combat_1` | `configs/combat_1.json` | tier 1 arenas of `train` | 118.8 M (1,900 iterations) | none: PPO alone from random weights |
 | `unified_full_1`, phase one | `configs/unified_full.json` | `train`, all tiers by curriculum (it ended in the keys stage) | 49.0 M (498 iterations) | β 1 → 0.1 over 30 M steps; weight 1 → 0.5 → 0.25 → 0.1 at held-out exit rates 0.45, 0.50, 0.63 |
-| `unified_full_2`, phase two | `configs/unified_full_2.json` | `train_v2` for 5.1 M steps, then `train_v3` | the shipped checkpoint is named in the top-level README; by 5:25 AM the run had been scored up to 172.0 M (tag `main_0525_dev`) | β 0.15 → 0.1; weight 0.25, then 0.1 at 14.7 M, 0.03 at 29.5 M, **0 at 44.2 M**; β is 0 from the next iteration on |
+| `unified_full_2`, phase two | `configs/unified_full_2.json` | `train_v2` for 5.1 M steps, then `train_v3` | which checkpoints are in the shipped weights is stated in the top-level README; the run was scored at 172.0 M (5:25 AM, tag `main_0525_dev`) and at 196.6 M (iteration 2,000, 6:08 AM, `main_final_M` in the final-pick logs) | β 0.15 → 0.1; weight 0.25, then 0.1 at 14.7 M, 0.03 at 29.5 M, **0 at 44.2 M**; β is 0 from the next iteration on |
+| `clone_mix_full`, a branch of phase two | `configs/clone_mix_full.json` | `train_mix_ref50`: 3,000 organizer-style maps and 3,000 maps of `train_v3` | resumed from a copy of the main run's checkpoint at 125.3 M (iteration 1,275), same step counter; scored at 164.7 M (iteration 1,675, 6:08 AM, `clone_final_M`), 39.3 M steps of its own | none: the weight was 0 before the branch started |
 
 What `logs/unified_full_2_train_log.csv` shows (iterations 1 to 899 of phase two, 88.4 M steps,
 three hours of wall-clock time; the columns are named in brackets):
@@ -342,13 +350,26 @@ three hours of wall-clock time; the columns are named in brackets):
   turn and USE labels goes from 0.77 at iteration 450 to 0.59 at iteration 899: the policy leaves
   the teacher's way of moving while its exit rate rises.
 
+**Weight average** (`rl/average.py`). The weighted mean of the network tensors of checkpoints of one
+architecture: every tensor of the state dict is summed in float64 with the given weights and stored
+as float32. Iteration, step counter, the front-end entry of the provenance record and the code
+fingerprint come from the last file; the network entry of the record is computed again for the
+averaged network; optimiser, normalisation, curriculum and distillation state are dropped, so
+training cannot resume from the result. Checkpoints of another architecture are refused. The agent
+shipped at 6:42 AM is the equal-weight average of the branch at iteration 1,675 and the main run at
+iteration 2,000 (the command is step 4e of the top-level README, with the decoding setting it
+stores in the exported file). Run on those two checkpoints the tool gives the state dict of the
+policy file shipped at 6:42 AM (sha256 prefix `4dd361277fb1`) bit for bit, all 73 tensors. A weight
+average is not a trained network: what was and was not measured on it is in the top-level README
+under "Known limits".
+
 Throughput. Training machine, 128 worker processes × 12 environments with the learner on one GPU:
 8,000 to 12,000 environment steps per second in phase two (`env_steps_per_s`: median 7,975 up to
 iteration 760, while a second run shared the machine, and 11,762 after). On a 15-core laptop under
 load: about 1,100 for the whole loop with 3 workers and the learner on the laptop GPU, where the
 acting forward pass and the update are the limits (`rl/README.md`, "Throughput").
 
-Tests: `tests/test_rl.py`, `tests/test_unified.py`.
+Tests: `tests/test_rl.py`, `tests/test_unified.py`, `tests/test_average.py`.
 
 ## 5. Evaluation and promotion
 
@@ -388,8 +409,8 @@ python training/bench/agent_latency.py
 python validate.py
 ```
 
-Promotion rule: a policy file is copied to `submission/weights/policy.pt` only when the comparison
-says it is better than the file already there, that is when its tier-weighted score on the frozen
+Promotion rule during the run: a policy file was copied to `submission/weights/policy.pt` only when the
+comparison said it was better than the file already there, that is when its tier-weighted score on the frozen
 suite is higher by more than one composite point and by more than two standard errors of the
 paired difference; `promote compare` gives a tie to the checkpoint that has had more reinforcement
 learning. `promote check` is the ship gate for a candidate, nine checks: the directory is small;
@@ -408,7 +429,9 @@ wide 49.9 against 33.7), `main_0135` (dev 77.0 against 68.8, wide 58.4 against 4
 lower but inside the noise margin). Two checkpoints in between were scored and not promoted:
 `main_0355` (dev 75.5, wide 62.8, both below the shipped agent) and `main_0445` (dev 80.5 against
 77.8, wide 62.3 against 69.9: a gain on one suite and a loss on the other, each inside its noise
-margin). The agent shipped in the end is named in the top-level README. Side runs are in
+margin). At 5:37 AM the same checkpoint was shipped again with another decoding setting stored in
+its policy file (`main_0525_M`: move, strafe, turn, USE and weapon take their most likely option).
+The agent shipped in the end is named in the top-level README. Side runs are in
 `logs/results.csv` as well: a wider network (`wide_0035`, `configs/unified_wide.json`, stopped), a
 copy of phase two with other reward settings (`copy_*`,
 `configs/unified_full_2b.json`, stopped), and clones of phase two on map sets that mix in the
@@ -420,9 +443,28 @@ The final choice (`final_pick.py`) is made on four held-out suites: `heldout_v1`
 `score` plays an agent on all four through the real agent; `report` prints every suite and tier
 with standard errors, the split by monsters, and for every pair of agents the paired differences
 and the decision: B replaces A only if its weighted headline is better by more than noise and it
-is not worse by more than noise on any single suite. The reports made so far are
+is not worse by more than noise on any single suite. The reports made up to 5:37 AM are
 `logs/final_pick_report_*.txt`; `logs/failure_breakdown_main_0135.txt` is a breakdown of the
 episodes one of them is made from (deaths by monster, timeouts by cause).
+
+The last comparison (6:08 to 6:42 AM) had four challengers against the holder `main_0525_M`: the
+main run at 196.6 M steps, the branch at 164.7 M, the equal-weight average of those two
+(`blend_final_M`) and the average of the main run's last nine checkpoints. The organizer-style
+suite `heldout_ref_v1` was scored beside the four suites; it is not part of the rule. On one
+engine seed the report's rule said that the average of the two branches replaces the holder
+(+1.86 on the headline, margin 1.82). The two generated suites and the organizer-style suite were
+then played on two more engine seeds for the two branches and their average. On three seeds none
+of the three is ahead of the holder's headline by more than noise (the average: +0.70 ± 0.74; the
+nine-checkpoint average was level on its one seed), so the rule alone keeps the holder. The
+average was shipped at 6:42 AM by a decision of the team lead, because it is not worse by more
+than noise on any suite and is ahead on the organizer-style suite by +6.64 ± 1.30. The top-level
+README states that decision with all its numbers ("How the shipped agent was chosen"). Logs:
+`logs/final_pick_0618.txt` (three challengers, one seed), `logs/final_pick_0630_with_blend.txt`
+(with the average of the two branches, one seed), `logs/final_pick_three_seeds_shipped_main_clone.txt`
+and `logs/final_pick_three_seeds_shipped_blend_main.txt` (three seeds). `final_pick score` plays
+the generated suites on one engine seed; the further seeds and the split of the organizer-style
+suite into its two halves were run by scripts outside the repository through
+`training.promote.score_local`, and `promote score --seeds` plays any seeds from the command line.
 
 Logs: `logs/results.csv` (one row per tier and one for all tiers, per evaluation tag; the tags of
 the baselines and of every agent that was shipped are listed in the table of the top-level

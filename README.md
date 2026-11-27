@@ -10,17 +10,19 @@ evaluation categories, a curiosity reward and a curriculum. Combat is learned by
 random weights. Navigation is kickstarted by a scripted teacher that exists only at training time
 (`training/teacher/`, never imported by the agent). Its weight in the loss is stepped down as the
 policy's own held-out exit rate rises; it reached zero 44.2 M steps into the second training phase,
-and the shipped checkpoint has had 127.8 M further steps of reinforcement learning
-alone. There is no rule tree, no path search and no aiming maths in `submission/`; the only
+and the shipped weights are the equal-weight average of two branches of that phase, with 152.4 M and 120.4 M further steps of reinforcement learning alone behind them (the first 81.1 M shared).
+There is no rule tree, no path search and no aiming maths in `submission/`; the only
 hand-written code that touches action choice is two action masks computed from observation fields
 (`submission/doomnet/spec.py`), and a lint test enforces this on every push.
 
 **What is not claimed.** The network has a manager that chooses a sub-goal and a target cell. In the
-shipped weights its choices are close to uniform: they drifted there after the teacher was switched
-off, while the scores kept rising. The measurement is under [Known limits](#known-limits).
+shipped weights its choices carry little information: the sub-goal is close to a uniform draw and the target is
+spread over hundreds of map cells. They drifted there after the teacher was switched off, while the
+scores kept rising. The measurement is under [Known limits](#known-limits).
 
-**Techniques used to train the shipped agent.** Every row is in the code path that produced the
-committed weights; the last column is where to read it.
+**Techniques used to train the shipped agent.** Every row but the last is in the code path that
+produced the committed weights; whether the last one is too is stated under
+[Held-out suites](#held-out-suites) ("Shipped weights"). The last column is where to read it.
 
 | Technique | What we did | Where |
 |---|---|---|
@@ -29,11 +31,12 @@ committed weights; the last column is where to read it.
 | Reward shaping | Terms that mirror the evaluation categories (exit, efficiency, keys and doors, sectors explored, kills) plus small shaping terms: bonus per hit, cost per missed shot, damage, death and door-reversal penalties | `training/rl/reward.py` |
 | Curriculum learning | Staged by tier: combat arenas first; then navigation, doors, keys and the full gauntlet in turn, each stage with its own tier mix; after the first 30 M steps of the last phase, adaptive sampling that favours the tier with the lowest recent exit rate | `training/rl/curriculum.py`, `training/configs/` |
 | Curiosity | **On. Count-based and map novelty, not RND.** Two episodic terms from the agent's own memory map: a bonus for each map cell observed for the first time, and 1/sqrt(n) on the n-th entry into a cell. Own value head, weight 0.3 on the advantage; it contributes about 3.7 of return per episode beside 8.6 of task return. We ran no ablation without it, so we claim no measured gain from it | `training/rl/intrinsic.py` |
-| Imitation, then PPO alone | An imitation term inside PPO, not a separate cloning stage. Combat: PPO alone from random weights. Navigation: the student drives the engine and a scripted teacher labels the states it reaches; the labels enter as a distillation loss beside the PPO loss. Its weight stepped down 0.25, 0.1, 0.03, 0 as the policy's held-out exit rate rose and reached 0 at 44 M steps of the last phase; the shipped weights come from a further 127.8 M steps of PPO alone | `training/rl/train.py`, `training/rl/ppo.py`, `training/teacher/` |
+| Imitation, then PPO alone | An imitation term inside PPO, not a separate cloning stage. Combat: PPO alone from random weights. Navigation: the student drives the engine and a scripted teacher labels the states it reaches; the labels enter as a distillation loss beside the PPO loss. Its weight stepped down 0.25, 0.1, 0.03, 0 as the policy's held-out exit rate rose and reached 0 at 44 M steps of the last phase; the shipped weights are the equal-weight average of two branches of that phase, with 152.4 M and 120.4 M further steps of reinforcement learning alone behind them (the first 81.1 M shared) | `training/rl/train.py`, `training/rl/ppo.py`, `training/teacher/` |
 | Action masking | Two masks from observation fields, identical in training and inference: USE only with a door ray within reach; ATTACK only with an enemy in view and a gun selected | `submission/doomnet/spec.py` |
 | Ego-centric occupancy grid | An 11-channel 64 x 64 grid centred on the agent (free, wall, door, locked door, visited, recency, enemy, item, key, exit, used), cut from a map the agent builds from its own actions and observations. Agent-centred, but kept in the start frame's orientation: it does not rotate with the heading | `submission/doomnet/memory.py`, `submission/doomnet/encode.py` |
 | Vectorised environments | 1,536 engine instances in 128 worker processes with batched policy inference on the GPU, 8,000 to 12,000 environment steps per second | `training/rl/vecenv.py`, `training/rl/rollout.py` |
-| Procedural maps | Our own generator in the organizers' map format: layouts for every tier, randomised sizes, textures, starts, monsters and pickups, and a solver that proves each map can be finished. 4,500 maps in the last training phase; held-out suites frozen as grids | `training/mapgen/`, `training/suites/` |
+| Procedural maps | Our own generator in the organizers' map format: layouts for every tier, randomised sizes, textures, starts, monsters and pickups, and a solver that proves each map can be finished. 4,500 maps in the main run of the last training phase, 6,000 in its branch (next row); held-out suites frozen as grids | `training/mapgen/`, `training/suites/` |
+| Branch on organizer-style maps, weight averaging | A branch of the last phase: the main run's checkpoint at 125.3 M steps, continued with the same settings (PPO alone) on a map set that is half organizer-style (only zombieman, imp and chaingunner, only stimpacks, an exit on every map) and half the main run's own maps, tier by tier. The weights of a checkpoint of each branch can then be averaged, tensor by tensor, into one network of the same architecture. The agent shipped at 6:42 AM is such an average | `training/configs/clone_mix_full.json`, `training/rl/mix_manifests.py`, `training/rl/average.py` |
 
 What is in this repository:
 
@@ -64,8 +67,9 @@ official score.
 
 ### The ladder
 
-Development suite `dev_v1` (20 maps per tier). One row per baseline and per agent that was shipped,
-in order; each row is in `training/logs/results.csv` under the tag in its first column. Tier
+Development suite `dev_v1` (20 maps per tier). One row per baseline and per agent that was shipped
+up to 5:37 AM, in order, then the agent shipped in the end; each row is in
+`training/logs/results.csv` under the tag in its first column. Tier
 columns are composites, "all" is tier-weighted (weights 1, 2, 3, 4) with its standard error, the
 exit rate is over maps that have an exit, kills are kills over monsters. The teacher weight is the
 weight of the distillation term in the loss at that checkpoint. Phase-two rows include the combat
@@ -79,7 +83,8 @@ run and all of phase one.
 | Promoted 12:38 AM (`main_0035`) | phase two, 19.7 M | 0.1 | 87.2 | 84.7 | 81.8 | 46.6 | 68.8 ± 3.9 | 0.71 | 0.72 | 0.18 |
 | Promoted 1:38 AM (`main_0135_dev`) | phase two, 49.2 M | 0 | 91.2 | 86.8 | 85.7 | 62.1 | 77.0 ± 3.9 | 0.83 | 0.75 | 0.13 |
 | Promoted 3:08 AM (`main_0305_dev`) | phase two, 98.3 M | 0 | 83.2 | 89.0 | 92.9 | 59.5 | 77.8 ± 3.8 | 0.82 | 0.78 | 0.14 |
-| **Shipped**: main_0525_M, chosen 5:37 AM | phase two, 172.0 M | 0 | 87.2 | 92.1 | 86.8 | 71.8 | 81.9 ± 3.6 | 0.86 | 0.80 | 0.10 |
+| Shipped 5:37 AM (`main_0525_M`) | phase two, 172.0 M | 0 | 87.2 | 92.1 | 86.8 | 71.8 | 81.9 ± 3.6 | 0.86 | 0.80 | 0.10 |
+| **Shipped**, chosen 6:42 AM (`blend_final_M`) | phase two: average of the main run at 196.6 M and its branch at 164.7 M | 0 | 93.0 | 90.1 | 92.6 | 83.1 | 88.3 ± 2.5 | 0.92 | 0.83 | 0.04 |
 
 Twenty maps per tier is a small sample: a single tier moves by several points between two
 checkpoints of the same run (compare tier 1 and tier 4 of the last rows), which is why a promotion
@@ -97,22 +102,60 @@ suites come from seeds that training sets refuse; the authored ones have a diffe
 the generator that made the training maps. A suite's score is the mean over its maps weighted by tier,
 with a map that has no hell knight or cacodemon counted three times; the headline combines the
 suites with weights 0.35, 0.2, 0.2 and 0.25 (640 counted maps; tier 1 maps without an exit are
-left out). Reports: `training/logs/final_pick_report_*.txt`. These suites are held out of the
-training data, not out of our sight: the failure breakdown of the 1:38 AM agent on them is the
-source of the limits listed below.
+left out). Reports: `training/logs/final_pick_report_*.txt` and, for the last comparison,
+`training/logs/final_pick_0618.txt`, `final_pick_0630_with_blend.txt` and the two
+`final_pick_three_seeds_*.txt`. These suites are held out of the training data, not out of our
+sight: the failure breakdown of the 1:38 AM agent on them is the source of the limits listed below.
 
-| Agent | Headline | `heldout_v1` | `heldout_wide_v1` | `authored_v1` | `authored_hard_v1` |
-|---|---|---|---|---|---|
-| Promoted 12:38 AM | 61.4 ± 1.2 | 78.0 ± 1.5 | 50.4 ± 2.6 | 74.6 ± 3.0 | 36.5 ± 3.1 |
-| Promoted 1:38 AM | 72.2 ± 1.2 | 83.6 ± 1.3 | 66.2 ± 2.5 | 82.4 ± 2.4 | 52.8 ± 3.4 |
-| Promoted 3:08 AM | 75.5 ± 1.1 | 85.6 ± 1.2 | 69.4 ± 2.5 | 87.2 ± 2.5 | 56.7 ± 3.0 |
-| **Shipped**: main_0525_M | 78.4 ± 1.1 | 84.5 ± 1.3 | 77.1 ± 2.1 | 86.7 ± 1.9 | 64.4 ± 3.5 |
+A fifth suite, `heldout_ref_v1` (`training/suites/heldout_ref_v1.jsonl`, 240 generated maps from
+seeds no training set uses), is in the style of the maps the organizers published with the
+template (`maps/`, `tests/fixtures/`): zombieman, imp and
+chaingunner are the only monsters, stimpacks the only pickup, and every map has an exit. Half of
+each tier has the base sizes (the normal half), half the long routes and crowded rooms of the wide
+profile (the dense half). Its score is the tier-weighted mean over its maps. It is not part of the
+headline and not part of the decision rule. The maps of the official evaluation are hidden: that
+they resemble the published ones is our assumption, and this suite is our generator's imitation
+of them, not a sample.
 
-Shipped weights: `submission/weights/policy.pt`, sha256 prefix `3f90be8826ef` (the agent
-prints it at start), second-phase checkpoint at 172.0 M steps, 340 M
-environment steps in all (combat 118.8 M, phase one 49.0 M, phase two); and
-`submission/weights/exit_detector.pt`, sha256 prefix `8985406ed0a6`. Decoding setting stored with the
-policy file: move, strafe, turn, USE and weapon take their most likely option, attack is sampled, and so are the manager's choices.
+Seeds: engine seeds per map on the two generated suites and on the organizer-style suite; a map
+counts once, as the mean over its seeds. The two authored suites are always played on five
+seeds. For the first three agents the tracked logs hold no score on the organizer-style suite.
+
+| Agent | Seeds | Headline | `heldout_v1` | `heldout_wide_v1` | `authored_v1` | `authored_hard_v1` | Organizer-style `heldout_ref_v1` |
+|---|---|---|---|---|---|---|---|
+| Promoted 12:38 AM | 1 | 61.4 ± 1.2 | 78.0 ± 1.5 | 50.3 ± 2.6 | 74.6 ± 3.0 | 36.5 ± 3.1 | |
+| Promoted 1:38 AM | 1 | 72.2 ± 1.2 | 83.6 ± 1.3 | 66.2 ± 2.5 | 82.4 ± 2.4 | 52.8 ± 3.4 | |
+| Promoted 3:08 AM | 1 | 75.5 ± 1.1 | 85.6 ± 1.2 | 69.4 ± 2.5 | 87.2 ± 2.5 | 56.7 ± 3.0 | |
+| Shipped 5:37 AM (`main_0525_M`) | 1 | 78.4 ± 1.2 | 84.5 ± 1.3 | 77.1 ± 2.2 | 86.7 ± 1.9 | 64.4 ± 3.5 | 65.9 ± 2.5 |
+| the same agent | 3 | 78.9 ± 1.1 | 86.8 ± 0.9 | 75.5 ± 1.7 | 86.7 ± 1.9 | 64.4 ± 3.5 | 68.3 ± 2.0 |
+| **Shipped** (`blend_final_M`) | 3 | 79.6 ± 1.1 | 88.5 ± 0.7 | 75.2 ± 1.7 | 87.2 ± 2.5 | 64.6 ± 3.4 | 75.0 ± 1.8 |
+
+The organizer-style suite by half (120 maps each), on the seeds of the rows above:
+
+| Agent | Seeds | Normal half | Dense half | Both |
+|---|---|---|---|---|
+| Shipped 5:37 AM (`main_0525_M`) | 3 | 84.4 ± 1.8 | 52.3 ± 2.5 | 68.3 ± 2.0 |
+| **Shipped** (`blend_final_M`) | 3 | 88.2 ± 1.4 | 61.8 ± 2.5 | 75.0 ± 1.8 |
+
+The last row of both tables rests on 3,115 held-out episodes played through the real
+agent with the shipped decoding: three engine seeds on the two generated suites and five on the two authored ones,
+and the organizer-style suite on the seeds named in its row.
+
+Shipped weights: `submission/weights/policy.pt`, sha256 prefix `4dd361277fb1` (the agent
+prints it at start). It is the equal-weight average of the network weights (all 73 tensors, 1,307,153 values) of two checkpoints of the same network, made by `training/rl/average.py`: the main run of phase two at 196.6 M steps, and a branch that left the main run at 125.3 M steps and trained on to 164.7 M on a map set that is half organizer-style (39.3 M steps of its own). The step counter stored in the file is the main run's.
+Behind the two checkpoints are 404 M environment steps: combat 118.8 M, phase one 49.0 M, the main run of phase two 196.6 M and the branch's own 39.3 M. Decoding setting stored with the policy file:
+move, strafe, turn, USE and weapon take their most likely option, attack is sampled, and so are the manager's choices.
+The other weights file is `submission/weights/exit_detector.pt`, sha256 prefix `8985406ed0a6`.
+
+### How the shipped agent was chosen
+
+The rule was written down before the last comparison and is the one `python -m training.final_pick
+report` applies (`decide` in `training/final_pick.py`): a challenger replaces the holder only if its
+weighted headline is higher by more than noise and it is not worse by more than noise on any of
+the four suites. Noise is the larger of one composite point and two standard errors of the paired,
+map-by-map difference.
+
+At 6:42 AM the holder was `main_0525_M` (the main run at 172.0 M steps of phase two, shipped at 5:37 AM). On three engine seeds on the two generated suites and five on the two authored ones, the weighted headline of `blend_final_M` is 79.61 ± 1.07 against 78.91 ± 1.06, a paired difference of +0.70 ± 0.74 with a noise margin of 1.49: level, so by the rule alone the holder would have stayed. No suite is worse by more than noise; better by more than noise: `heldout_v1` (+1.69 ± 0.75). On the organizer-style suite, which is not part of the rule, it scores 74.98 against 68.35: +6.64 ± 1.30, better by more than noise (normal half 88.17 against 84.42, +3.75 ± 1.26, better by more than noise; dense half 61.80 against 52.27, +9.52 ± 2.25, better by more than noise). The team lead decided to ship `blend_final_M`: it is not worse by more than noise on any suite and it is clearly better on the maps most like the organizers' own. That is a decision outside the written rule, not a win under it. On the first engine seed alone the headline difference had been +1.86 ± 0.91, just beyond its margin of 1.82; the two further seeds on the generated suites gave +0.12 ± 0.80 on their own. The other candidates of that comparison, against the same holder: the main run alone at 196.6 M steps, headline 78.98 (level) and 71.10 on the organizer-style suite; the branch alone at 164.7 M steps, 78.34 (level, and worse by more than noise on `authored_hard_v1`, −5.71 ± 2.01) and 73.18; the average of the main run's last nine checkpoints, 79.02 on one seed (level). The same averaged weights with the default decoding (USE and weapon only) were level with the shipped setting on one seed (shipped minus default +0.82 ± 0.82 on the headline). Reports: `training/logs/final_pick_0618.txt`, `final_pick_0630_with_blend.txt`, `final_pick_three_seeds_shipped_main_clone.txt` and `final_pick_three_seeds_shipped_blend_main.txt`.
 
 ### What the training log shows
 
@@ -134,8 +177,11 @@ and 0.63 (the gate history stored in its last checkpoint; `training/configs/unif
 quotes the last step). The second phase started again at 0.25 on a new map set.
 
 The run went on past the end of this log copy. Its later gate reports, read from the history stored
-in the run's checkpoints (not in the repository), stay between 0.83 and 0.89: 0.83 at 88.5 M steps,
-0.84 at 103.2 M, 0.88 at 118.0 M, 0.86 at 132.7 M, 0.87 at 147.5 M and 0.89 at 162.2 M.
+in the run's checkpoints (not in the repository), stay between 0.83 and 0.90: 0.83 at 88.5 M steps,
+0.84 at 103.2 M, 0.88 at 118.0 M, 0.86 at 132.7 M, 0.87 at 147.5 M, 0.89 at 162.2 M, 0.90 at
+176.9 M and 0.88 at 191.7 M. The branch that left the run at 125.3 M steps (`clone_mix_full`,
+see [Reproducing the training](#reproducing-the-training)) reports 0.87, 0.86 and 0.89 at 132.7 M,
+147.5 M and 162.2 M of its own counter, read from its checkpoint at 164.7 M in the same way.
 
 ### Component measurements
 
@@ -152,6 +198,7 @@ monster-free maps (`training/logs/unified_smoke.txt`).
 
 ### Known limits
 
+- **The shipped weights are an average that was never trained as one network.** They are the mean of two branches' weights: no gradient step was taken at these values, and the mean of two networks that play well need not play well. The two branches share their training up to 125.3 M steps of phase two and differ by the 71.3 M and 39.3 M steps after it; we did not test averages of networks further apart. Measured on the averaged weights, through the real agent: 3,115 held-out episodes with the shipped decoding (the tables above), the 80 development episodes, the nine-check ship gate and the manager's entropies in the next item. Not measured: any other weights than 0.5 and 0.5, a failure breakdown of its episodes (the one below is of the 1:38 AM agent), and the official maps and scorer.
 - **The manager's choices are close to random in the shipped weights.** The manager and the
   value-propagation block were trained with the teacher's labels. After the teacher's weight
   reached zero (iteration 450 of phase two), the entropy of the sub-goal head rose from 0.68 to
@@ -162,14 +209,20 @@ monster-free maps (`training/logs/unified_smoke.txt`).
   the held-out exit rate rose from 0.77 to 0.85. On the weights promoted at 3:08 AM the two
   entropies are 2.01 and 7.44 on recorded inputs, and on two later checkpoints of the run (120.4 M
   and 149.9 M steps) 2.00 and 7.32, 2.02 and 7.06 (`training/logs/manager_probe.txt`; a small probe, 10
-  manager steps of two recorded episodes). So the
-  hierarchy is in the architecture and was trained, but in the shipped weights the sub-goal and the
-  target are near-uniform draws, and the controller acts from its own sensors, its recurrent state
-  and the patch of the value field it reads. The same probe shows that the controller still
-  responds to the sub-goal embedding it is given (swapping it moves the move and strafe
-  probabilities by about 0.10 in total variation; swapping the target by 0.03 to 0.04). We have not
-  measured what the value field still contributes, and we do not claim that the shipped agent plans
-  through sub-goals.
+  manager steps of two recorded episodes). The shipped policy file is not one of the checkpoints in
+  that log; the same measurement on it gives 2.04 and 6.74 nats, the
+  second being the entropy of an even choice among about 850 of the 4,096 cells
+  (`python docs/brief/fill_final.py --manager-probe` computes both from the file). So the
+  hierarchy is in the architecture and was trained, but in the shipped weights the sub-goal is a
+  near-uniform draw and the target is spread over hundreds of cells, and the controller acts from
+  its own sensors, its recurrent state and the patch of the value field it reads. The probe log
+  also shows, for the checkpoints it lists, that the controller still responds to the sub-goal
+  embedding it is given (swapping it moves the move and strafe probabilities by about 0.10 in total
+  variation; swapping the target by 0.03 to 0.04). We have not measured what the value field still
+  contributes, and we do not claim that the shipped agent plans through sub-goals.
+- **Dense organizer-style maps.** The dense half of the organizer-style suite is the hardest set
+  we score: the table under [Held-out suites](#held-out-suites) has the shipped agent's composite
+  on it beside the normal half.
 - **Heavy monsters and chaingunners.** On the four held-out suites the agent of 1:38 AM had a
   death rate of 0.41 on maps that hold a hell knight or a cacodemon, against 0.05 on the other
   maps. Among those other maps the death rate was 0.005 without a chaingunner, 0.15 with one and
@@ -268,8 +321,9 @@ training/mapgen/           procedural generator of grid layouts, randomisation, 
 training/suites/           frozen held-out and development suites, stored as grids
 training/teacher/          scripted navigation teacher (training-time scaffolding, uses search)
 training/exitdet/          frame collection, training and evaluation of the exit detector
-training/rl/               recurrent PPO: workers, buffer, loss, reward, curiosity, curriculum, export
-training/configs/          configs of the combat run and the unified runs, with notes and the launch steps
+training/rl/               recurrent PPO: workers, buffer, loss, reward, curiosity, curriculum, export;
+                           average.py (weight average of checkpoints), mix_manifests.py (map set of the branch)
+training/configs/          configs of the combat run, the unified runs and the branches, with notes and the launch steps
 training/scorer.py, runner.py, evaluate.py, mapmeta.py     local scorer, episode runner, suite evaluation
 training/promote.py, ops/  score a checkpoint as a candidate agent, ship gate, remote evaluation runs
 training/final_pick.py     the report for the final choice: four held-out suites, paired verdicts, decision rule
@@ -279,6 +333,7 @@ training/tests/            tests of all of the above; test_rules.py is the rule-
 training/logs/             curated logs of the runs quoted in the documents (results.csv: every scored checkpoint)
 docs/                      contract, rules, submission guide, evaluation details (template), ARCHITECTURE.md
 docs/brief/                brief.md and brief.pdf, build_brief.py (renders it, checks the 2 pages), fill_final.py
+                           (writes the final agent's facts into the brief and this file; final_values.json holds them)
 env/, maps/, validate.py, tests/, docker/, Dockerfile       the official template, unchanged
 ```
 
@@ -288,8 +343,9 @@ Generated maps, datasets and run directories go to `data/` and `runs/`, which ar
 
 The stages, their files and their logs are described in [training/README.md](training/README.md);
 the settings of each run are explained next to its config in `training/configs/`. The shipped policy
-is the end of three runs in a row: combat (118.8 M steps), phase one of the unified loop (49.0 M)
-and phase two (the checkpoint named under Results). In short:
+comes out of three runs in a row, combat (118.8 M steps), phase one of the unified loop (49.0 M) and
+phase two, and of a branch of phase two; which checkpoints are in it is stated under Results and
+again below the commands. In short:
 
 ```bash
 # 1. Maps. train: 300 per tier 0-4 (combat run and phase one). train_v2: 600 per tier with 90% of the
@@ -301,6 +357,16 @@ python -m training.mapgen.cli --out data/maps/train_v2 --n 600 --tiers 0,1,2,3,4
 python -m training.mapgen.cli --out data/maps/train_v3 --extend data/maps/train_v2/manifest.jsonl --profile wide \
     --n 150,350,500,500 --tiers 1,2,3,4 --seed 7000000 --randomize 0.5 --start-quarter 0.5 --start-any 0.05 --start-offset 0.05
 python -m training.mapgen.cli --from-suite training/suites/dev_v1.jsonl --out data/maps/dev
+
+# 1b. Organizer-style maps (profiles reference and reference_wide: zombieman, imp, chaingunner, stimpacks, an exit
+#     on every map), and the map set of the branch (step 4d): all 3,000 of them plus 3,000 maps of train_v3, as many
+#     per tier (450, 750, 750, 1,050 in tiers 1 to 4; none of tier 0)
+python -m training.mapgen.cli --out data/maps/ref_part --profile reference --n 225,375,375,525 --tiers 1,2,3,4 \
+    --seed 7200000 --randomize 0.5 --start-quarter 0.5 --start-any 0.05 --start-offset 0.05
+python -m training.mapgen.cli --out data/maps/train_ref_v1 --extend data/maps/ref_part/manifest.jsonl --profile reference_wide \
+    --n 225,375,375,525 --tiers 1,2,3,4 --seed 7300000 --randomize 0.5 --start-quarter 0.5 --start-any 0.05 --start-offset 0.05
+python -m training.rl.mix_manifests data/maps/train_mix_ref50/manifest.jsonl data/maps/train_ref_v1/manifest.jsonl \
+    data/maps/train_v3/manifest.jsonl --seed 4321
 
 # 2. Navigation teacher: check it on monster-free held-out layouts (it is used inside steps 4b and 4c)
 python -m training.teacher.gate --tag heldout_nav_clean --suite training/suites/heldout_nav_v1.jsonl
@@ -328,23 +394,52 @@ python -u -m training.rl.train --maps data/maps/train_v3/manifest.jsonl --config
     --init runs/unified_full_1/latest.pt --heldout data/maps/dev/manifest.jsonl \
     --workers 128 --envs-per-worker 12 --out runs/unified_full_2
 
-# 5. A checkpoint becomes a candidate agent, is scored through the real agent and compared with the
-#    shipped one; the ship gate must pass before its policy file is copied into submission/weights/
+# 4d. A branch of phase two: the main run's checkpoint at iteration 1,275 (125.3 M steps), continued with the
+#     same settings on the mixed map set of step 1b. The teacher's weight is zero from the start of the branch,
+#     so every step of it is PPO alone. Its step counter goes on from the main run's
+mkdir -p runs/clone_mix_full && cp runs/unified_full_2/ckpt_001275.pt runs/clone_mix_full/latest.pt
+python -u -m training.rl.train --maps data/maps/train_mix_ref50/manifest.jsonl --config training/configs/clone_mix_full.json \
+    --resume runs/clone_mix_full/latest.pt --heldout data/maps/dev/manifest.jsonl --out runs/clone_mix_full
+
+# 4e. Weight average of one checkpoint of each branch (float64 sum of every tensor, stored as float32; iteration
+#     and step counter are the last file's), exported as the agent's weights file with the decoding setting in
+#     its config: move, strafe, turn, USE and weapon take their most likely option. The files and weights written
+#     here are those of the agent shipped at 6:42 AM
+python -m training.rl.average runs/blend/blend.pt runs/clone_mix_full/ckpt_001675.pt runs/unified_full_2/ckpt_002000.pt \
+    --weights 0.5,0.5 --policy-file runs/blend/policy.pt --greedy-heads move,strafe,turn,use,weapon
+
+# 5. A checkpoint (or an exported weights file such as runs/blend/policy.pt) becomes a candidate agent, is scored
+#    through the real agent and compared with the shipped one; the ship gate must pass before its policy file is
+#    copied into submission/weights/
 python -m training.promote score runs/unified_full_2/latest.pt --tag NEW_dev --suite dev
 python -m training.promote score runs/unified_full_2/latest.pt --tag NEW_wide --suite training/suites/dev_wide_v1.jsonl
 python -m training.promote compare OLD_dev NEW_dev      # exit status 0 only if NEW replaces OLD: better by more than
                                                         # noise, or a tie within one point with more RL behind NEW
 python -m training.promote check runs/promote/NEW_dev   # ship gate: 9 checks
 
-# 6. The final choice between finished agents, on the four held-out suites
+# 6. The final choice between finished agents, on the four held-out suites (one engine seed on the two generated
+#    suites, five on the authored ones), and the organizer-style suite beside them
 python -m training.final_pick score runs/promote/OLD_dev --tag OLD
 python -m training.final_pick score runs/promote/NEW_dev --tag NEW
 python -m training.final_pick report OLD NEW
+python -m training.promote score --candidate runs/promote/NEW_dev --tag NEW_ref --suite training/suites/heldout_ref_v1.jsonl \
+    --seeds 0,1,2
 ```
 
-What differed in the run that produced the shipped weights: phase two played its first 5.1 M steps
+The shipped weights are the output of step 4e with these arguments: `--weights 0.5,0.5` for `runs/clone_mix_full/ckpt_001675.pt runs/unified_full_2/ckpt_002000.pt`, that is iteration 1,675 of the branch (164.7 M steps) and iteration 2,000 of the main run (196.6 M), the branch named first, so that the file carries the main run's counters. `training.rl.average` gives the shipped tensors exactly: its average of these two checkpoints equals the state dict of `submission/weights/policy.pt` in all 73 tensors, bit for bit (compared by `docs/brief/fill_final.py --draft` when this text was written). The file's sha256 is not reproduced, because the file also stores the name and the hash of the averaged checkpoint and a provenance record with the time it was written.
+
+What differed in the runs behind the shipped weights: phase two played its first 5.1 M steps
 on `train_v2` and was then resumed (`--resume`) on `train_v3`; the runs were stopped and restarted a
-few times on rented machines, each time from their own last checkpoint.
+few times on rented machines, each time from their own last checkpoint. The branch ran on a second
+machine with 64 workers of 24 environments (the same 1,536 environments) and was restarted several
+times in its first 2.5 M steps while that layout was being chosen. Its map set was written on that
+machine by a scratch script with the logic of `training/rl/mix_manifests.py` and the same seed;
+compared with a copy of that file, the tracked script's output holds the same 6,000 maps, the
+3,000 of `train_v3` in another order within each tier. In the last comparison the two further engine
+seeds on the generated suites, the organizer-style table by half and the storing of the decoding
+setting were run by scripts outside the repository that call `training.promote.score_local`,
+`training.final_pick` and the agent's own file layout; their output is in the logs named above,
+and `training.rl.average --greedy-heads` is the tracked form of the last of the three.
 
 `--workers` and `--envs-per-worker` are sized for a Linux machine with about 128 cores and a GPU
 for the learner; the same commands run on a laptop with smaller numbers (the learner uses CUDA,
@@ -426,17 +521,24 @@ that drive the agent to navigate unfamiliar rooms rather than getting stuck in c
   lowest recent exit rate.
 - **Teacher** (`training/teacher/`): navigation is started by distillation from a scripted
   explorer, described under rule compliance below; its weight reached zero 44.2 M steps into phase
-  two and the run has been PPO alone since. Combat is learned by PPO alone.
+  two and the run, and the branch that later left it, have been PPO alone since. Combat is learned
+  by PPO alone.
 - **Maps** (`training/mapgen/`): a procedural generator of grid layouts with randomised textures,
   light levels, start heading and offset, and monster facing and ambush flags, in a base and a
-  wide profile; 4,500 maps in phase two. Checkpoints are scored on frozen layouts from seeds never
-  trained on.
-- **Evaluation** (`training/evaluate.py`, `promote.py`, `final_pick.py`): a checkpoint replaces the
-  shipped one only if it wins the paired comparison on a development suite by more than noise (one
-  composite point and two standard errors of the map-by-map difference), or ties it within one point
-  with more reinforcement learning behind it, and passes a ship gate of nine checks: size,
-  provenance of the weights, the official validator, four test files (rule lint, fuzz, agent,
-  doors), latency, and a tree identical to the one that was scored.
+  wide profile; 4,500 maps in the main run of phase two. Two more profiles keep to the monsters and
+  pickups of the organizers' maps; the branch of phase two trained on 3,000 of those and 3,000 of
+  the 4,500. Checkpoints are scored on frozen layouts from seeds never trained on.
+- **Evaluation** (`training/evaluate.py`, `promote.py`, `final_pick.py`): during the run a checkpoint
+  replaced the shipped one only if it won the paired comparison on a development suite by more
+  than noise (one composite point and two standard errors of the map-by-map difference), or tied
+  it within one point with more reinforcement learning behind it, and passed a ship gate of nine
+  checks: size, provenance of the weights, the official validator, four test files (rule lint,
+  fuzz, agent, doors), latency, and a tree identical to the one that was scored. The last choice
+  was made on the held-out suites; its rule and what was decided are under
+  [How the shipped agent was chosen](#how-the-shipped-agent-was-chosen).
+- **Weight averaging** (`training/rl/average.py`): the weighted mean of the tensors of checkpoints
+  of one architecture, with a fresh provenance record. Whether the shipped weights are such an
+  average is stated under [Held-out suites](#held-out-suites).
 
 ## Rule compliance
 
@@ -468,7 +570,7 @@ The rules are in [docs/RULES.md](docs/RULES.md). How this repository meets them:
   stepped down only while the held-out exit rate of the policy alone holds; it has been zero since
   44.2 M steps into phase two, and from that step on no teacher action is executed and no label
   enters the loss (`training/logs/unified_full_2_train_log.csv`, columns `distill_weight` and
-  `beta`). The exit detector's
+  `beta`). The branch of phase two started after that step and never had a teacher. The exit detector's
   frame collector (`training/exitdet/collect.py`) uses scripted wandering and shooting to produce
   frames; it produces no policy labels. The map generator's solvability check and reference walker
   use search and true positions and are used on maps only.
@@ -484,13 +586,13 @@ thread whatever `device` it is given and never initialises CUDA, so it uses no G
 
 | Measurement | Result | Conditions and log |
 |---|---|---|
-| Full `act()` in the official validator, Docker image, one CPU | median 2.4 ms, p99 6.5 ms, max 7 ms (first call 7 ms) | one episode of 46 decisions on `maps/two_rooms.wad`; fresh clone of commit 0bf38b2 with the weights of the 3:08 AM agent, 27 Nov 4:38 AM; `python validate.py --docker --no-gpu` with the template's image built locally (linux/arm64), agent pinned to one CPU; `training/logs/fresh_clone_validation.txt` |
+| Full `act()` in the official validator, Docker image, one CPU | median 2.4 ms, p99 6.8 ms, max 7 ms (first call 7 ms) | one episode of 45 decisions on `maps/two_rooms.wad`; fresh clone of commit 49633a4, the commit that shipped the blended weights, 27 Nov 6:45 AM (the same check on commit 0bf38b2 at 4:38 AM, with the 3:08 AM weights: 2.4 / 6.5 / 7 ms); `python validate.py --docker --no-gpu` with the template's image built locally (linux/arm64), agent pinned to one CPU; `training/logs/fresh_clone_validation.txt` |
 | The same clone, natively on the Mac | median 1.1 ms | `python validate.py`; same file |
 | Full `act()`, benchmark on the Mac, one thread | mean 1.05 ms, p95 1.99 ms, max 5.8 ms | `training/bench/agent_latency.py`: 3 maps × 700 decisions, best of 3 repeats; `training/logs/latency.txt`, section 1 |
 | Full `act()`, GitHub Actions runner, x86-64 | mean 3.98 ms, p95 7.27 ms, max 10.6 ms | the same benchmark in the CI job; `training/logs/latency.txt`, section 2 |
 | Mean `act()` time while scoring | 1.5 to 2.2 ms per scoring run, at most 14 ms for a single call | columns `act_ms_mean` and `act_ms_max` of `training/logs/results.csv`, the runs tagged `main_*` (22 by 5:26 AM), scored on the Mac |
 | Building the agent | 1.7 s in the image | limit 60 s; all warm-up happens here |
-| Peak RAM in `validate.py --docker` | 794 MB | limit 8,192 MB |
+| Peak RAM in `validate.py --docker` | 798 MB (794 MB at 4:38 AM) | limit 8,192 MB |
 
 The two benchmark rows were measured on 26 Nov, before trained weights existed, with the policy
 network at its initial weights; the architecture has not changed since, and the cost of a pass does

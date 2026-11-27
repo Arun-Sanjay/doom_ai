@@ -7,8 +7,8 @@ and a docstring disagree, the docstring describes the code.
 
 This file describes what the code computes. What the trained, shipped weights make of it is a
 separate question with a measured answer, and for the manager that answer limits what can be
-claimed: its sub-goal and target choices are close to uniform in the shipped weights. Section 6e
-states this with the numbers; read it together with 6b to 6d.
+claimed: in the shipped weights its sub-goal is close to a uniform draw and its target is spread
+over hundreds of map cells. Section 6e states this with the numbers; read it together with 6b to 6d.
 
 ```
  observation ──> 1 odometry ──> 2 exit detector ──> 3 memory map ──> 4 encoder, masks ──> 5 PolicyNet ──> 9 buttons
@@ -380,9 +380,12 @@ checkpoint promoted at 3:08 AM (iteration 1,000) has a sub-goal entropy of 2.01 
 top probability of 0.19 (a uniform choice has 0.125), and a target entropy of 7.44 nats with a
 mean top probability of 0.005; the checkpoints at iterations 1,225 and 1,525 are the same within
 0.4 nats. The first shipped agent, trained with the teacher throughout, has 0.15 and 0.62 nats.
-"The shipped weights" below means a policy file of this lineage from iteration 1,000 on, which is
-what the top-level README names as shipped; the probe was run on the three checkpoints listed
-here.
+"The shipped weights" below means the policy file the top-level README names as shipped: a
+checkpoint of this lineage from iteration 1,000 on, or a weight average of such checkpoints of the
+run and of its branch (the README says which, and how the average was made). The probe log covers
+the three checkpoints listed here. For the shipped file itself the README gives the same two
+entropies under "Known limits"; `python docs/brief/fill_final.py --manager-probe` computes them
+from the file on the same recorded inputs.
 
 What follows, and what does not:
 

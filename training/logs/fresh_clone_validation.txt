@@ -26,3 +26,84 @@ The lines under 2 are the validator's own output with the terminal colour codes 
 output was not kept as a file; its two numbers are from the run record written at the time.
 The architecture and the agent code are the same for every checkpoint, so the cost per decision does not
 depend on which policy file is shipped.
+
+
+Fresh-clone validation of the shipped blend, 2026-11-27 06:45 IST
+==================================================================
+
+A new `git clone` of the default branch at commit 49633a4 (policy.pt sha256 4dd361277fb1, the 50/50 blend with
+movement decoded by most likely option; exit_detector.pt sha256 8985406ed0a6), same procedure as above.
+
+1. `python validate.py` (macOS arm64, native): PASSED. Exit reached in 45 steps. Step latency p50 1.1 ms, p99 3.7 ms, max 4 ms.
+
+2. `python validate.py --docker --no-gpu` (locally built image `devforge-doom`):
+
+   Repository size (tracked files): 12.5 MB of 1.0 GB
+   requirements.txt: no extra packages
+   DoomAgent interface: __init__, reset, act
+   CPU limit: agent pinned to 1 CPU (core 14), like the evaluation sandbox
+   Initialization: 1.6s (limit 60s) on device 'cpu'
+   Episode on '0_two_rooms.wad:MAP01': 45 steps, exit reached, agent time 0.1s of 21.0s budget, 0.1s wall-clock
+   Step latency '0_two_rooms.wad:MAP01': first 7 ms, p50 2.4 ms, p99 6.8 ms, max 7 ms
+   Peak RAM: 798 MB resident (limit 8192 MB, including files written to /tmp)
+   PASSED
+
+3. The networks inside the running agent were compared with the two files tensor by tensor (73 tensors, 1,307,153 values and
+   14 tensors, 416,867 values): identical. With the two files removed the agent refuses to start.
+
+
+Linux machine with a GPU, 2026-11-27 05:40 IST (commit 145acae, the weights shipped at that time: policy.pt 3f90be8826ef)
+==================================================================
+
+A copy of a fresh clone on a rented Linux machine (RTX 5090, CUDA available), environment from the repository's own lock file.
+The machine was running a 64-worker training job at the time (load average 117), so the latencies are worst-case readings.
+
+   commit 145acae52b16d805772e34640416d968efcb0f46 | tracked changes: 0
+   3f90be8826ef  submission/weights/policy.pt
+   8985406ed0a6  submission/weights/exit_detector.pt
+   python 3.13.18 | torch 2.15.0+cu132 | cuda available True | NVIDIA GeForce RTX 5090
+   ===== 1. validate.py, default device (GPU visible)
+     Repository size (tracked files): 12.2 MB of 1.0 GB
+     requirements.txt: no extra packages
+     DoomAgent interface: __init__, reset, act
+     CPU limit: agent pinned to 1 CPU (core 127), like the evaluation sandbox
+     Initialization: 1.8s (limit 60s) on device 'cuda'
+     Episode on 'two_rooms.wad:MAP01': 42 steps, exit reached, agent time 0.2s of 21.0s budget, 0.2s wall-clock
+     Step latency 'two_rooms.wad:MAP01': first 14 ms, p50 3.8 ms, p99 14.3 ms, max 14 ms
+     Peak RAM: 609 MB resident (limit 8192 MB, including files written to /tmp)
+    ! Peak GPU memory: could not be measured here (nvidia-smi has no per-process data); try --docker on a Linux GPU host
+   PASSED with 1 warning(s).
+   exit 0
+   ===== 2. validate.py --device cuda
+     Repository size (tracked files): 12.2 MB of 1.0 GB
+     requirements.txt: no extra packages
+     DoomAgent interface: __init__, reset, act
+     CPU limit: agent pinned to 1 CPU (core 127), like the evaluation sandbox
+     Initialization: 3.5s (limit 60s) on device 'cuda'
+     Episode on 'two_rooms.wad:MAP01': 42 steps, exit reached, agent time 0.5s of 21.0s budget, 0.6s wall-clock
+     Step latency 'two_rooms.wad:MAP01': first 22 ms, p50 10.9 ms, p99 23.6 ms, max 24 ms
+     Peak RAM: 611 MB resident (limit 8192 MB, including files written to /tmp)
+    ! Peak GPU memory: could not be measured here (nvidia-smi has no per-process data); try --docker on a Linux GPU host
+   PASSED with 1 warning(s).
+   exit 0
+   ===== 3. validate.py --device cpu with the GPU hidden
+     Repository size (tracked files): 12.2 MB of 1.0 GB
+     requirements.txt: no extra packages
+     DoomAgent interface: __init__, reset, act
+     CPU limit: agent pinned to 1 CPU (core 127), like the evaluation sandbox
+     Initialization: 1.7s (limit 60s) on device 'cpu'
+     Episode on 'two_rooms.wad:MAP01': 42 steps, exit reached, agent time 0.2s of 21.0s budget, 0.3s wall-clock
+     Step latency 'two_rooms.wad:MAP01': first 12 ms, p50 4.0 ms, p99 11.8 ms, max 12 ms
+     Peak RAM: 576 MB resident (limit 8192 MB, including files written to /tmp)
+   PASSED
+   exit 0
+   ===== 4. explicit device check: agent built with device='cuda'
+   [doomnet] weights: policy.pt sha256 3f90be8826ef | exit_detector.pt sha256 8985406ed0a6
+   [doomnet] device argument 'cuda' ignored: inference runs on the CPU with one thread
+   [doomnet] decoding: most likely option for move, strafe, turn, use, weapon; sampled: attack (policy.pt config["greedy_heads"])
+   [doomnet] ready in 0.92 s
+   networks: 2 | parameter and buffer devices: ['cpu'] | torch threads: 1
+   act() on one pinned CPU: mean 9.88 ms, p50 8.75, p95 19.66, p99 20.65, max 21.37 (n=295)
+   GPU memory held by this agent process: none (process not on the GPU) | torch.cuda.memory_allocated: 0
+   peak RAM of this process: 617 MB
+   load average: 116.93, 112.21, 109.45
